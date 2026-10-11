@@ -61,13 +61,20 @@ export class WilmaService {
     return this.halo.get<HaloUser>(`/Users/${id}`);
   }
 
-  /** Paged user search; returns active users only. */
+  /** Real people only: active and not a Halo service account (alerting/PBX/firewall mailboxes etc.). */
+  private isPerson(u: HaloUser): boolean {
+    return !u.inactive && u.isserviceaccount !== true;
+  }
+
+  /** Paged user search; returns active, non-service-account users only. */
   private async searchUsers(query: Query, maxPages = MAX_SEARCH_PAGES): Promise<HaloUser[]> {
     const out: HaloUser[] = [];
     for (let page = 1; page <= maxPages; page++) {
       const res = await this.halo.get<UserList>("/Users", {
         includeactive: true,
         includeinactive: false,
+        includenonserviceaccount: true,
+        includeserviceaccount: false,
         pageinate: true,
         page_size: PAGE_SIZE,
         page_no: page,
@@ -76,10 +83,10 @@ export class WilmaService {
       const batch = res?.users ?? [];
       out.push(...batch);
       const total = res?.record_count;
-      if (batch.length < PAGE_SIZE || (total !== undefined && out.length >= total)) return out.filter((u) => !u.inactive);
+      if (batch.length < PAGE_SIZE || (total !== undefined && out.length >= total)) return out.filter((u) => this.isPerson(u));
     }
     log("warn", "user_search_truncated", { pages: maxPages });
-    return out.filter((u) => !u.inactive);
+    return out.filter((u) => this.isPerson(u));
   }
 
   /**
@@ -91,7 +98,7 @@ export class WilmaService {
     const out: HaloUser[] = [];
     for (const hit of shortlist.slice(0, MAX_DETAIL_LOOKUPS)) {
       const u = needsDetail(hit) ? await this.getUser(hit.id) : hit;
-      if (!u.inactive && (!fullName || nameMatches(fullName, u))) out.push(u);
+      if (this.isPerson(u) && (!fullName || nameMatches(fullName, u))) out.push(u);
     }
     if (shortlist.length > MAX_DETAIL_LOOKUPS) log("warn", "detail_lookups_capped", { shortlist: shortlist.length });
     return out;

@@ -43,6 +43,8 @@ const users: HaloUser[] = [
   { id: 402, firstname: "Peter", surname: "Gibbons", name: "Peter Gibbons", emailaddress: "office@initech.com", phonenumber: "512 555 0100", ...INITECH },
   { id: 403, firstname: "John", surname: "Smith", name: "John Smith", emailaddress: "j.smith@initech.com", phonenumber: "512 555 0100", ...INITECH },
   { id: 404, firstname: "John", surname: "Smith", name: "John Smith", emailaddress: "john.smith2@initech.com", phonenumber: "512 555 0100", ...INITECH },
+  // Service account (PBX alert mailbox) carrying a client's main number; Halo returns it despite the filter
+  { id: 601, firstname: "unknown", surname: "unknown", name: "unknown unknown", emailaddress: "pbx@chapel.example", phonenumber: "(403) 555-7311", client_id: 70, client_name: "Example Chapel", isserviceaccount: true },
   // Megacorp: 150 contacts on one main line; the real caller is near the end
   ...Array.from({ length: 150 }, (_, i): HaloUser =>
     i === 140
@@ -449,5 +451,31 @@ describe("logUnverifiedRequest", () => {
     const off = new WilmaService(halo, loadConfig({ ...baseEnv, HALO_UNVERIFIED_USER_ID: "" }));
     await expect(off.logUnverifiedRequest(base)).rejects.toThrow(/aren't enabled/);
     expect(halo.posts).toHaveLength(0);
+  });
+});
+
+describe("service accounts", () => {
+  it("asks Halo to exclude them", async () => {
+    await svc.verifyChatUser({ email: "mike@acme.com" });
+    expect(halo.gets.find((g) => g.path === "/Users")?.query).toMatchObject({
+      includeserviceaccount: false,
+      includenonserviceaccount: true,
+    });
+  });
+
+  it("can't be verified as, even if Halo returns them", async () => {
+    expect((await svc.verifyChatUser({ email: "pbx@chapel.example" })).verified).toBe(false);
+    const r = await svc.verifyCaller({ caller_id: "4035557311", full_name: "Unknown Unknown", company_name: "Example Chapel" });
+    expect(r.verified).toBe(false);
+  });
+
+  it("never shows up as a possible match", async () => {
+    await svc.logUnverifiedRequest({
+      channel: "phone", stated_name: "Jane Doe", caller_id: "403-555-7311", email: "pbx@chapel.example",
+      summary: "Phones down", details: "No dial tone on any phone",
+    });
+    const note = halo.posts.find((p) => p.path === "/Actions")!.body[0].note_html;
+    expect(note).not.toContain("user 601");
+    expect(note).toContain("None found");
   });
 });

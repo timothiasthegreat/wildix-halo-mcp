@@ -23,6 +23,7 @@ export interface HaloUser {
   site_id?: number;
   site_name?: string;
   inactive?: boolean;
+  isserviceaccount?: boolean;
 }
 
 export interface HaloTicket {
