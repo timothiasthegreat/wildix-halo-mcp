@@ -70,8 +70,12 @@ if (toolLog) {
   });
 }
 
+// MCP endpoint. Served at /mcp and also at / so a Server URL entered without the
+// path (or a proxy that strips it) still works.
+const MCP_PATHS = ["/mcp", "/"];
+
 // Stateless Streamable HTTP: a fresh server + transport per request.
-app.post("/mcp", requireApiKey, async (req: Request, res: Response) => {
+app.post(MCP_PATHS, requireApiKey, async (req: Request, res: Response) => {
   const info = { ip: req.ip ?? "unknown", userAgent: req.get("user-agent") };
   if (toolLog) {
     // Record non-tool traffic too (initialize, tools/list, ...) to see how Wilma connects.
@@ -101,8 +105,8 @@ app.post("/mcp", requireApiKey, async (req: Request, res: Response) => {
 const methodNotAllowed = (_req: Request, res: Response) => {
   res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
 };
-app.get("/mcp", requireApiKey, methodNotAllowed);
-app.delete("/mcp", requireApiKey, methodNotAllowed);
+app.get(MCP_PATHS, requireApiKey, methodNotAllowed);
+app.delete(MCP_PATHS, requireApiKey, methodNotAllowed);
 
 const httpServer = app.listen(cfg.PORT, () => log("info", "listening", { port: cfg.PORT }));
 

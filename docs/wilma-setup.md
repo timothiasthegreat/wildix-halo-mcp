@@ -13,7 +13,7 @@ In Wildix, open the **Add new MCP Server** form and fill it in:
 | **Name** | `halo-mcp`. For a test-mode deployment, use a separate entry such as `halo-mcp-test`. |
 | **Category** | `Default`, or whichever category you use for support tools |
 | **Description** | Paste the text below |
-| **Server URL** | `https://wilma-halo.example.com/mcp`. Include the `/mcp` path: the bare domain only serves `/healthz`. |
+| **Server URL** | `https://wilma-halo.example.com/mcp`. Version 0.1.1 and later also accept the bare domain, but `/mcp` is preferred. |
 | **Authorization** | Bearer token with the `MCP_API_KEY` value (see below) |
 
 ### Description (paste this)
@@ -47,7 +47,7 @@ Click **Next**. Wildix connects and lists the tools it found. Enable all seven:
 | `log_unverified_request` | Callback requests from people who couldn't be verified |
 
 If no tools appear:
-- Check that the URL ends in `/mcp`.
+- **`Cannot POST /`** means the request reached the container without the `/mcp` path, and the image is 0.1.0. Add `/mcp` to the Server URL, or update to 0.1.1 or later, which answers at `/` too.
 - Check that the key matches `MCP_API_KEY` exactly.
 - Check the container logs in Portainer. A `mcp_auth_failed` entry means the key or header is wrong; no entry at all means the request isn't reaching the container (proxy or DNS).
 
