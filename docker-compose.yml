@@ -1,0 +1,38 @@
+# Portainer stack. Set the variables below in the stack's "Environment variables" section
+# (or an .env file next to this compose file when using docker compose directly).
+services:
+  wildix-halo-mcp:
+    image: wildix-halo-mcp:latest
+    build: .
+    container_name: wildix-halo-mcp
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MCP_API_KEY: ${MCP_API_KEY:?set MCP_API_KEY}
+      TOKEN_SECRET: ${TOKEN_SECRET:?set TOKEN_SECRET}
+      TOKEN_TTL_MIN: ${TOKEN_TTL_MIN:-60}
+      HALO_BASE_URL: ${HALO_BASE_URL:?set HALO_BASE_URL}
+      HALO_AUTH_URL: ${HALO_AUTH_URL:?set HALO_AUTH_URL}
+      HALO_TENANT: ${HALO_TENANT:-}
+      HALO_CLIENT_ID: ${HALO_CLIENT_ID:?set HALO_CLIENT_ID}
+      HALO_CLIENT_SECRET: ${HALO_CLIENT_SECRET:?set HALO_CLIENT_SECRET}
+      HALO_SCOPE: ${HALO_SCOPE:-read:tickets edit:tickets read:customers}
+      HALO_TICKETTYPE_ID: ${HALO_TICKETTYPE_ID:-}
+      HALO_TEAM_ID: ${HALO_TEAM_ID:-}
+      HALO_PRIORITY_LOW: ${HALO_PRIORITY_LOW:-}
+      HALO_PRIORITY_NORMAL: ${HALO_PRIORITY_NORMAL:-}
+      HALO_PRIORITY_HIGH: ${HALO_PRIORITY_HIGH:-}
+      HALO_TICKET_SOURCE_ID: ${HALO_TICKET_SOURCE_ID:-}
+      HALO_UPDATE_OUTCOME_ID: ${HALO_UPDATE_OUTCOME_ID:-}
+      HALO_UPDATE_NEW_STATUS_ID: ${HALO_UPDATE_NEW_STATUS_ID:-}
+      HALO_CLOSED_STATUS_IDS: ${HALO_CLOSED_STATUS_IDS:-9}
+      DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE:-1}
+      ALLOW_CLIENT_WIDE_TICKETS: ${ALLOW_CLIENT_WIDE_TICKETS:-false}
+    ports:
+      # Bind to localhost only; publish through your reverse proxy (TLS).
+      # If the proxy runs as a container, drop this and join its network instead.
+      - "127.0.0.1:3000:3000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
