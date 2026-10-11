@@ -64,7 +64,7 @@ npx @modelcontextprotocol/inspector   # Streamable HTTP, URL above, header Autho
 ## Deploy on Portainer
 1. Use the published image: set `WILDIX_HALO_MCP_IMAGE=<dockerhub-user>/wildix-halo-mcp:latest`. Or build it on the host with `docker build -t wildix-halo-mcp:latest .`.
 2. **Stacks → Add stack**, paste `docker-compose.yml`, and set the environment variables. Under *Environment variables*, choose **Load variables from .env file** and import a `portainer.env` file, which is git-ignored so secrets stay local. Make one by copying `.env.example` and removing the comment lines. Blank values fall back to the defaults in `docker-compose.yml`.
-3. Publish it through your reverse proxy with TLS, e.g. `https://wilma-halo.example.com` → `wildix-halo-mcp:3000`. Only `/mcp` and `/healthz` are served.
+3. The stack publishes no host ports. It joins an existing external Docker network named by `PROXY_NETWORK` (default `proxy`), which your reverse proxy must also be on. Create it first if needed with `docker network create proxy`. Then point the proxy, with TLS, at `http://wildix-halo-mcp:3000`, e.g. `https://wilma-halo.example.com` → `wildix-halo-mcp:3000`. Only `/mcp` and `/healthz` are served (plus `/debug/tool-calls` in test mode).
 4. Check it: `curl https://wilma-halo.example.com/healthz` should return `{"ok":true}`.
 
 ## Wilma configuration

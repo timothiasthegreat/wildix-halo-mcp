@@ -47,10 +47,12 @@ services:
       MAX_PUBLIC_NOTES: ${MAX_PUBLIC_NOTES:-3}
       NOTE_CHAR_LIMIT: ${NOTE_CHAR_LIMIT:-600}
       VERIFY_ATTEMPTS_PER_15MIN: ${VERIFY_ATTEMPTS_PER_15MIN:-5}
-    ports:
-      # Bind to localhost only; publish through your reverse proxy (TLS).
-      # If the proxy runs as a container, drop this and join its network instead.
-      - "127.0.0.1:3000:3000"
+    # No published ports: the reverse proxy reaches the container on port 3000
+    # over the shared external network below (e.g. http://wildix-halo-mcp:3000).
+    expose:
+      - "3000"
+    networks:
+      - proxy
     volumes:
       - wildix-halo-mcp-data:/data
     read_only: true
@@ -59,3 +61,9 @@ services:
 
 volumes:
   wildix-halo-mcp-data:
+
+networks:
+  proxy:
+    # Existing Docker network your reverse proxy is attached to
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
