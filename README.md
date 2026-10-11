@@ -69,6 +69,7 @@ npx @modelcontextprotocol/inspector   # Streamable HTTP, URL above, header Autho
 
 ## Wilma configuration
 - **Adding the server:** step by step, with a description to paste, in [docs/wilma-setup.md](docs/wilma-setup.md).
+- **Capabilities on a bot or voice agent:** variables, pipeline and annotation best practices in [docs/wilma-capabilities.md](docs/wilma-capabilities.md).
 - **MCP server URL:** `https://wilma-halo.example.com/mcp`
 - **Auth:** Bearer token `<MCP_API_KEY>`. A custom `X-API-Key` header also works.
 - **Instructions:** start from [docs/wilma-instructions.md](docs/wilma-instructions.md). Wilma must pass the call's caller ID to `verify_caller`.

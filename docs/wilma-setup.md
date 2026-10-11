@@ -53,6 +53,9 @@ If no tools appear:
 
 ## 3. Attach it to the agent and add the instructions
 
+Add the tools to your bot or voice agent as **capabilities**. [wilma-capabilities.md](wilma-capabilities.md) covers which ones each channel gets, the Auto/Guided/Predefined settings for each variable, the pipeline (always **Blocking request**), and safe analysis annotations.
+
+
 1. Add the `halo-mcp` server to the Wilma agent that answers your support calls and chats.
 2. Paste the prompt from [wilma-instructions.md](wilma-instructions.md) into the agent's Instructions. Before saving:
    - Replace `{{caller_number}}` with Wilma's variable for the inbound caller ID.
