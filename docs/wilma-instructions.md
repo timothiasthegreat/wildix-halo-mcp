@@ -1,6 +1,6 @@
 # Wilma instructions (HaloPSA tools)
 
-Paste the prompt below into the Instructions of the Wilma agent that has the `wildix-halo-mcp` tool attached.
+Paste the prompt below into the Instructions of the Wilma agent that has the `wildix-halo-mcp` tool attached. To add the MCP server to Wilma first, see [wilma-setup.md](wilma-setup.md).
 
 It follows the Wildix [instructions guidelines](https://docs.wildix.com/docs/messaging/bots/integrations/generative_ai/instructions):
 - Four bracketed sections: Identity, Style, Response Guidelines, Task.
