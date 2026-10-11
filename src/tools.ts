@@ -53,7 +53,7 @@ async function execute(tool: string, fn: () => Promise<unknown>): Promise<{ resu
  * and user agent. With `toolLog` (test mode), every call's arguments and result are recorded.
  */
 export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, toolLog?: ToolCallLog): McpServer {
-  const server = new McpServer({ name: "wildix-halo-mcp", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "wildix-halo-mcp", version: "0.1.1" }, { instructions: INSTRUCTIONS });
   const getIp = () => getReq().ip;
 
   const run = async (tool: string, args: unknown, fn: () => Promise<unknown>): Promise<CallToolResult> => {
