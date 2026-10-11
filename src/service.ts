@@ -1,13 +1,14 @@
 import type { Config } from "./config.js";
 import { log, RateLimiter } from "./audit.js";
 import { HaloError, type HaloApi, type Query } from "./halo/client.js";
-import type { ActionList, HaloAction, HaloTicket, HaloUser, TicketList, UserList } from "./halo/types.js";
+import type { ActionList, ClientList, HaloAction, HaloTicket, HaloUser, TicketList, UserList } from "./halo/types.js";
 import {
   allSamePerson,
   companyMatches,
   hasPhoneFields,
   nameMatches,
   normalizePhone,
+  normalizeText,
   signToken,
   TokenError,
   userPhoneNumbers,
@@ -41,6 +42,8 @@ const MAX_DETAIL_LOOKUPS = 25;
 
 export class WilmaService {
   private readonly verifyLimiter: RateLimiter;
+  private readonly unverifiedLimiter: RateLimiter;
+  private readonly unverifiedGlobalLimiter: RateLimiter;
   private readonly recentCreates = new Map<string, { id: number; at: number }>();
 
   constructor(
@@ -48,6 +51,8 @@ export class WilmaService {
     private readonly cfg: Config,
   ) {
     this.verifyLimiter = new RateLimiter(cfg.VERIFY_ATTEMPTS_PER_15MIN, 15 * 60_000);
+    this.unverifiedLimiter = new RateLimiter(cfg.UNVERIFIED_REQUESTS_PER_HOUR, 60 * 60_000);
+    this.unverifiedGlobalLimiter = new RateLimiter(cfg.UNVERIFIED_REQUESTS_GLOBAL_PER_HOUR, 60 * 60_000);
   }
 
   // ---------------- Halo lookups ----------------
@@ -413,6 +418,151 @@ export class WilmaService {
       company: rec.cn,
       message: `Ticket ${created.id} has been logged for ${id.fn}${id.ids.length > 1 ? ` under ${rec.cn}` : ""}. Read the ticket number back to them.`,
     };
+  }
+
+  // ---------------- Unverified requests ----------------
+
+  /**
+   * Log a callback request from someone who couldn't be verified. Always filed under the
+   * configured Unknown client / General User — never the client they claim — so it can't
+   * reach a real client's tickets, notifications or billing. The caller only gets a reference
+   * number back; possible Halo matches go in a private note for the technician.
+   */
+  async logUnverifiedRequest(
+    input: {
+      channel: "phone" | "chat";
+      stated_name: string;
+      stated_company?: string;
+      callback_number?: string;
+      caller_id?: string;
+      email?: string;
+      summary: string;
+      details: string;
+      verification_issue?: string;
+    },
+    ip = "unknown",
+  ) {
+    const userId = this.cfg.HALO_UNVERIFIED_USER_ID;
+    if (!userId) {
+      throw new UserFacingError("Unverified requests aren't enabled. Offer to take their name and number for a callback another way.");
+    }
+    const phone = normalizePhone(input.caller_id, this.cfg.DEFAULT_COUNTRY_CODE);
+    const email = input.email?.trim().toLowerCase();
+    const keys = [`ip:${ip}`, phone ? `phone:${phone}` : email ? `email:${email}` : "anonymous"];
+    if (!this.unverifiedGlobalLimiter.take("all") || !keys.every((k) => this.unverifiedLimiter.take(k))) {
+      log("warn", "unverified_rate_limited", { channel: input.channel });
+      throw new UserFacingError(
+        "Too many requests have been logged from this caller recently. Apologise and suggest they email or call back later; do not retry.",
+      );
+    }
+
+    const summary = `[Unverified] ${input.summary.trim()}`.slice(0, 200);
+    const dedupeKey = `unverified:${keys[1]}:${summary.toLowerCase()}`;
+    const recent = this.recentCreates.get(dedupeKey);
+    if (recent && Date.now() - recent.at < 10 * 60_000) {
+      return { ticket_id: recent.id, duplicate: true, message: `This was already logged as ticket ${recent.id}.` };
+    }
+
+    const row = (label: string, value?: string) =>
+      value?.trim() ? `<tr><td><b>${label}</b></td><td>${escapeHtml(value.trim())}</td></tr>` : "";
+    const details = [
+      `<p style="color:#b00020"><b>⚠ UNVERIFIED CALLER — confirm identity before acting.</b> ` +
+        `Do not reset passwords or MFA, grant access, or change accounts based on this ticket alone.</p>`,
+      `<p>${escapeHtml(input.details.trim()).replace(/\r?\n/g, "<br>")}</p>`,
+      "<table>",
+      row("Stated name", input.stated_name),
+      row("Stated company", input.stated_company),
+      row("Callback number", input.callback_number),
+      row("Caller ID", input.caller_id),
+      row("Email given", input.email),
+      row("Channel", input.channel === "chat" ? "Wilma chat" : "Wilma phone"),
+      row("Why unverified", input.verification_issue),
+      "</table>",
+      `<p><i>Logged by Wilma (Wildix AI). Possible Halo matches are in a private note.</i></p>`,
+    ].join("");
+
+    const created = first(
+      await this.halo.post<HaloTicket | HaloTicket[]>("/Tickets", [
+        {
+          summary,
+          details_html: details,
+          user_id: userId,
+          client_id: this.cfg.HALO_UNVERIFIED_CLIENT_ID,
+          site_id: this.cfg.HALO_UNVERIFIED_SITE_ID,
+          tickettype_id: this.cfg.HALO_TICKETTYPE_ID,
+          team_id: this.cfg.HALO_TEAM_ID,
+          priority_id: this.cfg.HALO_PRIORITY_NORMAL, // unverified callers can't escalate
+          source: this.cfg.HALO_TICKET_SOURCE_ID,
+        },
+      ]),
+    );
+    if (!created?.id) throw new Error("Halo did not return a ticket id");
+    this.recentCreates.set(dedupeKey, { id: created.id, at: Date.now() });
+    log("info", "unverified_ticket_created", { ticket_id: created.id, channel: input.channel });
+
+    // Best effort: a failed lookup or note must not lose the ticket.
+    try {
+      const hints = await this.possibleMatches(input.stated_name, input.stated_company, phone, email);
+      await this.halo.post("/Actions", [
+        {
+          ticket_id: created.id,
+          outcome_id: this.cfg.HALO_UPDATE_OUTCOME_ID,
+          note_html: `<p><b>Possible Halo matches (Wilma, for technician only):</b></p>${
+            hints.length ? `<ul>${hints.map((h) => `<li>${escapeHtml(h)}</li>`).join("")}</ul>` : "<p>None found.</p>"
+          }<p><i>Matches are suggestions from what the caller said; confirm identity on callback before reassigning.</i></p>`,
+          hiddenfromuser: true,
+          sendemail: false,
+        },
+      ]);
+    } catch (e) {
+      log("warn", "unverified_hint_failed", { ticket_id: created.id, error: e instanceof Error ? e.message : String(e) });
+    }
+
+    const callback = input.callback_number?.trim();
+    return {
+      ticket_id: created.id,
+      message:
+        `Logged as ticket ${created.id}. Tell them a technician will confirm their identity and follow up` +
+        (callback ? ` at ${callback}.` : ".") +
+        " Do not share any other account or ticket information.",
+    };
+  }
+
+  /** Loose matches for the technician: by caller ID, email, and stated name within the stated company. */
+  private async possibleMatches(name: string, company: string | undefined, phone: string, email?: string) {
+    const hints = new Map<number, string>();
+    const describe = (u: HaloUser, why: string) =>
+      hints.set(u.id, `${u.name ?? `${u.firstname ?? ""} ${u.surname ?? ""}`.trim()} — ${u.client_name ?? "?"} (user ${u.id}) — ${why}`);
+
+    if (phone) {
+      const hits = await this.searchUsers({ search: phone.slice(-4), search_phonenumbers: true }, 3);
+      const cc = this.cfg.DEFAULT_COUNTRY_CODE;
+      // Name first so a main line with hundreds of contacts stays cheap; fall back to anyone on the number.
+      let onNumber = (await this.detailsForName(hits, name, (u) => !hasPhoneFields(u))).filter((u) =>
+        userPhoneNumbers(u, cc).includes(phone),
+      );
+      let why = "caller ID and name match";
+      if (!onNumber.length && hits.length <= 5) {
+        onNumber = (await this.detailsForName(hits, undefined, (u) => !hasPhoneFields(u))).filter((u) =>
+          userPhoneNumbers(u, cc).includes(phone),
+        );
+        why = "caller ID matches";
+      }
+      onNumber.forEach((u) => describe(u, why));
+    }
+    if (email) (await this.usersByEmail(email)).forEach((u) => describe(u, "email matches"));
+    if (company) {
+      const res = await this.halo.get<ClientList>("/Client", { search: company, count: 25 });
+      const clients = (res?.clients ?? []).filter((c) => !c.inactive && companyMatches(company, c.name)).slice(0, 3);
+      const last = normalizeText(name).split(" ").pop();
+      for (const c of clients) {
+        const users = last ? await this.searchUsers({ client_id: c.id, search: last }, 1) : [];
+        const named = users.filter((u) => nameMatches(name, u));
+        named.forEach((u) => hints.has(u.id) || describe({ ...u, client_name: u.client_name ?? c.name }, "name and company match"));
+        if (!named.length) hints.set(-c.id, `Company "${c.name}" (client ${c.id}) matches; no contact by that name`);
+      }
+    }
+    return [...hints.values()].slice(0, 10);
   }
 
   async addTicketUpdate(token: string, ticketId: number, note: string) {

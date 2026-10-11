@@ -49,6 +49,18 @@ const schema = z.object({
   HALO_UPDATE_NEW_STATUS_ID: optInt, // optional: move ticket to this status when the user adds an update
   HALO_CLOSED_STATUS_IDS: intList("9"),
 
+  // Unverified requests: filed under Halo's Unknown client / General User. Set
+  // HALO_UNVERIFIED_USER_ID to an empty string to disable the tool.
+  HALO_UNVERIFIED_USER_ID: z
+    .string()
+    .default("19")
+    .transform((v) => (v.trim() === "" ? undefined : Number(v)))
+    .pipe(z.number().int().positive().optional()),
+  HALO_UNVERIFIED_CLIENT_ID: z.coerce.number().int().positive().default(1),
+  HALO_UNVERIFIED_SITE_ID: z.coerce.number().int().positive().default(1),
+  UNVERIFIED_REQUESTS_PER_HOUR: z.coerce.number().int().min(1).default(3), // per caller ID / email / IP
+  UNVERIFIED_REQUESTS_GLOBAL_PER_HOUR: z.coerce.number().int().min(1).default(30),
+
   // Behaviour
   DEFAULT_COUNTRY_CODE: z.string().regex(/^\d{1,3}$/).default("1"),
   ALLOW_CLIENT_WIDE_TICKETS: bool(false),

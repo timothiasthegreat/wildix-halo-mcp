@@ -57,6 +57,17 @@ export interface HaloAction {
   hiddenfromuser?: boolean;
 }
 
+export interface HaloClientRecord {
+  id: number;
+  name?: string;
+  inactive?: boolean;
+}
+
+export interface ClientList {
+  clients?: HaloClientRecord[];
+  record_count?: number;
+}
+
 export interface UserList {
   users?: HaloUser[];
   record_count?: number;

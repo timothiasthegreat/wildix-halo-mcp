@@ -161,5 +161,35 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
     ({ token, ticket_id, note }) => run("add_ticket_update", () => svc.addTicketUpdate(token, ticket_id, note)),
   );
 
+  server.registerTool(
+    "log_unverified_request",
+    {
+      title: "Log a callback request from an unverified person",
+      description:
+        "Use ONLY when the person could not be verified (verification failed, was rate-limited, or isn't possible) but needs help. " +
+        "Logs a request for a technician to follow up; the technician confirms their identity before acting. " +
+        "No token is needed and nothing about existing accounts or tickets is returned. Collect their name, company, best callback number, " +
+        "and a description of the problem first. Tell them a technician will confirm who they are when they follow up. " +
+        "Never use this for someone who verified successfully: use create_ticket instead.",
+      inputSchema: {
+        channel: z.enum(["phone", "chat"]).describe("Whether this is a phone call or a web chat."),
+        stated_name: z.string().min(2).max(120).describe("The name the person gave."),
+        stated_company: z.string().max(200).optional().describe("The company the person says they're with."),
+        callback_number: z.string().max(40).optional().describe("Best number to call them back on."),
+        caller_id: z.string().max(40).optional().describe("Phone calls: the caller ID number of the inbound call."),
+        email: z.string().email().optional().describe("Email address they gave or that was confirmed in chat."),
+        summary: z.string().min(5).max(180).describe("Short one-line title for the issue."),
+        details: z.string().min(10).max(8000).describe("Description of the issue in their words plus facts you collected."),
+        verification_issue: z
+          .string()
+          .max(300)
+          .optional()
+          .describe("Why they couldn't be verified, e.g. 'caller ID and name didn't match', 'new employee', 'too many attempts'."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    (args) => run("log_unverified_request", () => svc.logUnverifiedRequest(args, getIp())),
+  );
+
   return server;
 }

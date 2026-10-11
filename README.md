@@ -16,6 +16,7 @@ Wilma ──(Streamable HTTP + Bearer key)──► wildix-halo-mcp ──(OAuth
 | `get_ticket_update` | Status, assigned tech and the latest **public** notes for one of their tickets. |
 | `create_ticket` | New ticket for the verified person, using the configured type, team and priority. Takes a `company` when the person belongs to several. |
 | `add_ticket_update` | Public note on one of their open tickets. |
+| `log_unverified_request` | Callback request from someone who couldn't be verified. Filed under the Unknown client / General User, never the client they claim. Possible Halo matches go in a private note for the tech; the caller gets only a ticket number. |
 
 ### Security model
 - **Verification tokens.** The verify tools return a short-lived (default 60 min) HMAC-signed token holding the Halo user, client and site IDs. Every ticket tool requires it. The LLM can't forge a token or skip verification, and the client/user IDs on tickets always come from the token, never from the model.
@@ -24,6 +25,7 @@ Wilma ──(Streamable HTTP + Bearer key)──► wildix-halo-mcp ──(OAuth
   - **Different people on one office line:** the stated name picks the person. Two same-named people under the same client on that line count as ambiguous, and Wilma asks for the email.
   - **Shared mailbox in chat** (several people on one address): Wilma is asked for the person's name, and only the matching contact is verified.
   - Phone searches page through results (up to 1,000 contacts on one number), and names are filtered before any record is fetched in full.
+- **Unverified callers can leave a message, nothing more.** `log_unverified_request` needs no token, always files under the Unknown client / General User at normal priority, and carries an "UNVERIFIED CALLER" banner. It returns only the new ticket number. It is rate-limited per caller ID, email and IP (3 per hour) and capped at 30 per hour overall.
 - **Ownership checks happen server-side.** A ticket must belong to the verified user, or to their client if `ALLOW_CLIENT_WIDE_TICKETS=true`. "Not yours" and "doesn't exist" return the same message.
 - **Read filtering.** Reads use `excludeprivate` / `excludesys`, plus a client-side `hiddenfromuser` filter, so private notes never reach Wilma.
 - **No enumeration.** A failed verification doesn't reveal who a number or email belongs to.

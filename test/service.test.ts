@@ -4,7 +4,7 @@ import { HaloError, type HaloApi, type Query } from "../src/halo/client.js";
 import type { HaloTicket, HaloUser } from "../src/halo/types.js";
 import { UserFacingError, WilmaService } from "../src/service.js";
 
-const cfg = loadConfig({
+const baseEnv = {
   MCP_API_KEY: "k".repeat(32),
   TOKEN_SECRET: "s".repeat(40),
   HALO_BASE_URL: "https://halo.example.com/api",
@@ -18,7 +18,8 @@ const cfg = loadConfig({
   HALO_UPDATE_OUTCOME_ID: "1",
   HALO_CLOSED_STATUS_IDS: "9",
   VERIFY_ATTEMPTS_PER_15MIN: "100",
-});
+};
+const cfg = loadConfig(baseEnv);
 
 const ACME = { client_id: 10, client_name: "Acme Widgets Inc." };
 const ACME_HOLD = { client_id: 30, client_name: "Acme Holdings" };
@@ -60,13 +61,21 @@ const tickets: HaloTicket[] = [
 
 class FakeHalo implements HaloApi {
   posts: { path: string; body: any }[] = [];
+  failClientSearch = false;
   gets: { path: string; query?: Query }[] = [];
 
   async get<T>(path: string, query?: Query): Promise<T> {
     this.gets.push({ path, query });
+    if (path === "/Client") {
+      if (this.failClientSearch) throw new HaloError("boom", 500);
+      const s = String(query?.search ?? "").toLowerCase();
+      const clients = [...new Map(users.map((u) => [u.client_id, { id: u.client_id!, name: u.client_name }])).values()];
+      return { clients: clients.filter((c) => (c.name ?? "").toLowerCase().includes(s)) } as T;
+    }
     if (path === "/Users") {
       const s = String(query?.search ?? "").toLowerCase();
       const hits = users.filter((u) =>
+        (query?.client_id === undefined || u.client_id === query.client_id) &&
         query?.search_phonenumbers
           ? [u.phonenumber, u.mobilenumber].some((p) => (p ?? "").replace(/\D/g, "").includes(s))
           : [u.emailaddress, u.name].some((f) => (f ?? "").toLowerCase().includes(s)),
@@ -355,6 +364,90 @@ describe("tickets", () => {
 
   it("refuses updates on closed tickets", async () => {
     await expect(svc.addTicketUpdate(await tokenFor(), 5002, "still broken")).rejects.toThrow(/closed/);
+    expect(halo.posts).toHaveLength(0);
+  });
+});
+
+describe("logUnverifiedRequest", () => {
+  const base = {
+    channel: "phone" as const,
+    stated_name: "Michael Smith",
+    stated_company: "Acme Widgets",
+    callback_number: "403 555 1212",
+    caller_id: "604-555-1234",
+    summary: "Can't log in to email",
+    details: "Locked out since this morning",
+    verification_issue: "name didn't match caller ID",
+  };
+
+  it("files under the Unknown client and General User, never the claimed client", async () => {
+    const r = await svc.logUnverifiedRequest(base);
+    expect(r.ticket_id).toBe(7777);
+    const ticket = halo.posts.find((p) => p.path === "/Tickets")!.body[0];
+    expect(ticket).toMatchObject({ user_id: 19, client_id: 1, site_id: 1, tickettype_id: 3, priority_id: 3 });
+    expect(ticket.summary).toBe("[Unverified] Can't log in to email");
+    expect(ticket.details_html).toMatch(/UNVERIFIED CALLER/);
+    expect(ticket.details_html).toContain("403 555 1212");
+    expect(ticket.details_html).toContain("Acme Widgets");
+  });
+
+  it("tells the caller nothing about Halo matches", async () => {
+    const r = await svc.logUnverifiedRequest({ ...base, stated_name: "Sarah Jones" });
+    expect(JSON.stringify(r)).not.toMatch(/user 1\d\d|Michael|Sarah|Acme Widgets Inc|possible/i);
+    expect(r.message).toMatch(/403 555 1212/);
+  });
+
+  it("puts possible matches in a private note for the technician", async () => {
+    await svc.logUnverifiedRequest(base);
+    const note = halo.posts.find((p) => p.path === "/Actions")!.body[0];
+    expect(note).toMatchObject({ ticket_id: 7777, hiddenfromuser: true, sendemail: false });
+    expect(note.note_html).toContain("user 101");
+    expect(note.note_html).toContain("caller ID and name match");
+  });
+
+  it("suggests contacts by name + company when there's no caller ID match", async () => {
+    await svc.logUnverifiedRequest({ ...base, channel: "chat", caller_id: undefined, stated_name: "Sarah Jones" });
+    const note = halo.posts.find((p) => p.path === "/Actions")!.body[0].note_html;
+    expect(note).toContain("user 102");
+    expect(note).toContain("name and company match");
+  });
+
+  it("notes a matching company even when no contact has that name", async () => {
+    await svc.logUnverifiedRequest({ ...base, caller_id: "4035550000", stated_name: "New Hire", stated_company: "Globex" });
+    const note = halo.posts.find((p) => p.path === "/Actions")!.body[0].note_html;
+    expect(note).toMatch(/Globex.*client 20.*no contact by that name/);
+  });
+
+  it("still logs the ticket if the match lookup fails", async () => {
+    halo.failClientSearch = true;
+    const r = await svc.logUnverifiedRequest(base);
+    expect(r.ticket_id).toBe(7777);
+    expect(halo.posts.filter((p) => p.path === "/Tickets")).toHaveLength(1);
+  });
+
+  it("escapes what the caller says", async () => {
+    await svc.logUnverifiedRequest({ ...base, stated_name: "<img src=x onerror=alert(1)> Bob" });
+    expect(halo.posts[0]!.body[0].details_html).not.toContain("<img");
+  });
+
+  it("rate limits per caller ID and de-duplicates repeats", async () => {
+    const strict = new WilmaService(halo, { ...cfg, UNVERIFIED_REQUESTS_PER_HOUR: 2 });
+    await strict.logUnverifiedRequest({ ...base, summary: "one thing" });
+    const dup = await strict.logUnverifiedRequest({ ...base, summary: "one thing" });
+    expect(dup).toMatchObject({ duplicate: true });
+    await expect(strict.logUnverifiedRequest({ ...base, summary: "another thing" })).rejects.toThrow(/Too many/);
+  });
+
+  it("applies a global cap across all callers", async () => {
+    const strict = new WilmaService(halo, { ...cfg, UNVERIFIED_REQUESTS_GLOBAL_PER_HOUR: 2 });
+    await strict.logUnverifiedRequest({ ...base, caller_id: "4035550001" }, "1.1.1.1");
+    await strict.logUnverifiedRequest({ ...base, caller_id: "4035550002" }, "2.2.2.2");
+    await expect(strict.logUnverifiedRequest({ ...base, caller_id: "4035550003" }, "3.3.3.3")).rejects.toThrow(/Too many/);
+  });
+
+  it("can be disabled", async () => {
+    const off = new WilmaService(halo, loadConfig({ ...baseEnv, HALO_UNVERIFIED_USER_ID: "" }));
+    await expect(off.logUnverifiedRequest(base)).rejects.toThrow(/aren't enabled/);
     expect(halo.posts).toHaveLength(0);
   });
 });
