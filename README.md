@@ -99,3 +99,6 @@ See [.env.example](.env.example). Notable settings:
 - `HALO_CLOSED_STATUS_IDS`: statuses treated as closed (no updates allowed; hidden from the open list). Default `9`.
 - `HALO_UPDATE_NEW_STATUS_ID`: optionally move a ticket to a status like "Customer Replied" when the user adds an update.
 - `DEFAULT_COUNTRY_CODE`: used to normalise national-format numbers. Default `1` (NANP).
+
+## License
+[MIT](LICENSE)
