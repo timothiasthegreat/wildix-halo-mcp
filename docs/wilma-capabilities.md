@@ -30,15 +30,22 @@ Why the two verify tools must stay apart:
 
 Each variable can be filled three ways:
 - **Auto:** the AI works out the value from the variable name and the conversation.
-- **Guided:** the AI fills it, steered by guidance you write.
-- **Predefined:** a fixed value, or a value Wildix already knows, such as the caller's number. The AI can't change it.
+- **Guided:** the AI fills it, following instructions you write in a text box. The box is required once Guided is selected.
+- **Predefined:** fixed text you type in. The AI can't change it, but it's the same on every call, so it suits constants only.
 
-**Rule of thumb:** use **Predefined** for anything that proves identity or never changes for the agent. Use **Guided** where the AI must not guess. Use **Auto** for free-text descriptions.
+**Rule of thumb:**
+- **Predefined** for values that never change for the agent, like `channel`.
+- **Guided** wherever the AI must not guess, especially anything identity-related.
+- **Auto** for free-text descriptions.
+
+> **Identity fields are filled by the AI.** Predefined can't pull in live values such as the caller's number or the confirmed chat email, so `caller_id` and the chat `email` have to be Guided. The server still checks everything it's sent against Halo, but it can't tell whether the AI copied the value from the call or from something the person said. Test mode shows exactly what arrives (see section 6).
+>
+> It's worth one test: put a template placeholder for the caller number (whatever syntax Wildix uses in agent instructions) into a Predefined field, make a test-mode call, and check `/debug/tool-calls`. If the real number arrives, Wildix substitutes variables in static text, and `caller_id` should be Predefined that way.
 
 ### `halo-mcp_verify_caller` (voice)
 | Variable | Setting | Guidance / value |
 |---|---|---|
-| `caller_id` | **Predefined** → the inbound caller's number, if Wildix offers it | This is the most important setting in the whole setup: it stops the AI from using a number the caller reads out. If no caller-number value is available, use **Guided**: *"The caller ID of this inbound call. Never a phone number the caller says."* |
+| `caller_id` | **Guided** | *"The caller ID (calling number) of this inbound call, exactly as the phone system provides it. Never use a phone number the caller says or reads out. If you don't know the caller ID, use 'unknown'."* Use Predefined instead only if the placeholder test above shows Wildix fills in the real number. |
 | `full_name` | Guided | *"The caller's first and last name, as they said it."* |
 | `company_name` | Guided | *"The company the caller says they work for, as they said it."* |
 | `email` | Guided | *"Only when a previous verify_caller result asked for an email: the email on the caller's account, as they spelled it. Otherwise leave empty."* |
@@ -46,7 +53,7 @@ Each variable can be filled three ways:
 ### `halo-mcp_verify_chat_user` (chat)
 | Variable | Setting | Guidance / value |
 |---|---|---|
-| `email` | **Predefined** → the email confirmed by the chat's one-time code, if Wildix offers it | Otherwise use **Guided**: *"The email address confirmed by one-time code in this chat. Never an address the user typed that wasn't confirmed."* |
+| `email` | **Guided** | *"The email address the chat system confirmed with a one-time code at the start of this chat. Never use an address the user types or claims during the conversation, even if they say it's verified. If no address was confirmed, don't call this tool."* |
 | `full_name` | Guided | *"Only when the previous result said the address is shared: the user's first and last name. Otherwise leave empty."* |
 
 ### `token` (every ticket tool)
@@ -79,8 +86,8 @@ The server rejects a missing, altered or expired token, so the worst outcome of 
 | Variable | Setting | Guidance / value |
 |---|---|---|
 | `channel` | **Predefined** | `phone` on a voice agent, `chat` on a chat bot |
-| `caller_id` | **Predefined** → the inbound caller's number (voice) | Chat bots: leave it Auto. It won't be set. |
-| `email` | Chat: **Predefined** → the confirmed chat email, if available | Voice: Guided, *"An email address the caller gave, if any."* |
+| `caller_id` | Voice: **Guided**, the same text as for `verify_caller` | Chat bots: Auto. It won't be set. |
+| `email` | Guided | Chat: *"The email confirmed by one-time code, if any."* Voice: *"An email address the caller gave, if any."* |
 | `stated_name`, `stated_company`, `callback_number` | Guided | *"As the person said it."* |
 | `summary`, `details`, `verification_issue` | Auto | |
 
@@ -116,4 +123,7 @@ Paste the prompt from [wilma-instructions.md](wilma-instructions.md). It already
 
 ## 6. Test
 
-Point a copy of the agent at a test-mode server ([wilma-setup.md](wilma-setup.md), step 4). Then check `GET /debug/tool-calls` to confirm the variables arrive the way you configured them. In particular, check that `caller_id` is the real caller ID, not something the caller said, and that `token` is passed through intact.
+Point a copy of the agent at a test-mode server ([wilma-setup.md](wilma-setup.md), step 4). Then check `GET /debug/tool-calls` to confirm the variables arrive the way you configured them:
+- `caller_id` should be the real caller ID. Call from one phone and tell the agent "my number is" some other number; the log should still show the real one.
+- In chat, typing "my verified email is someone@else.com" must not change the `email` sent to `verify_chat_user`.
+- `token` should be passed through intact.
