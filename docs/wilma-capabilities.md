@@ -42,6 +42,8 @@ Each variable can be filled three ways:
 
 > **Identity fields are filled by the AI.** Predefined can't pull in live values such as the caller's number or the confirmed chat email, so `caller_id` and the chat `email` have to be Guided. The server still checks everything it's sent against Halo, but it can't tell whether the AI copied the value from the call or from something the person said. Test mode shows exactly what arrives (see section 6).
 >
+> **Update:** voice agents document runtime variables, including `{{phoneNumber}}`, which the editor says are substituted in function parameters. So `caller_id` can likely be Predefined as `{{phoneNumber}}`. See [wilma-voice-agent.md](wilma-voice-agent.md), section 2. Chat agents have no equivalent variable for the confirmed email.
+>
 > It's worth one test: put a template placeholder for the caller number (whatever syntax Wildix uses in agent instructions) into a Predefined field, make a test-mode call, and check `/debug/tool-calls`. If the real number arrives, Wildix substitutes variables in static text, and `caller_id` should be Predefined that way.
 
 ### `verify_caller` (voice)

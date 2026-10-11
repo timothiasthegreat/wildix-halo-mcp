@@ -71,6 +71,7 @@ npx @modelcontextprotocol/inspector   # Streamable HTTP, URL above, header Autho
 ## Wilma configuration
 - **Adding the server:** step by step, with a description to paste, in [docs/wilma-setup.md](docs/wilma-setup.md).
 - **Capabilities on a bot or voice agent:** variables, pipeline and annotation best practices in [docs/wilma-capabilities.md](docs/wilma-capabilities.md).
+- **Voice agent and Voice Bot dialplan app:** the WMS voice agent settings, Transfer, and getting the real caller ID with `{{phoneNumber}}` in [docs/wilma-voice-agent.md](docs/wilma-voice-agent.md).
 - **Chat bot and Kite widget:** the WMS chat agent settings, Handover, and the website widget in [docs/wilma-chat-widget.md](docs/wilma-chat-widget.md).
 - **Endpoints, one MCP server entry per channel:**
   - `https://wilma-halo.example.com/mcp/voice` for voice agents (`verify_caller` + ticket tools).
