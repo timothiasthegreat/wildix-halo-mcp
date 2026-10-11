@@ -201,15 +201,36 @@ export function companyMatches(stated: string, actual: string | undefined): bool
   return shortest >= 4 && similarity(a, b) >= 0.8;
 }
 
+function fullNameOf(u: HaloUser): string {
+  const fl = `${u.firstname ?? ""} ${u.surname ?? ""}`.trim();
+  return fl.includes(" ") ? fl : (u.name ?? fl);
+}
+
+/**
+ * True when every record looks like the same human (e.g. one contact set up under two Halo
+ * clients). Names must match in both directions, so "Mike Smith" / "Michael Smith" pass but
+ * "Sarah Jones" / "Michael Smith" (people sharing an office line or inbox) don't.
+ */
+export function allSamePerson(users: HaloUser[]): boolean {
+  if (users.length <= 1) return true;
+  const [ref, ...rest] = users;
+  return rest.every((u) => nameMatches(fullNameOf(ref!), u) && nameMatches(fullNameOf(u), ref!));
+}
+
 // ---------- Verification tokens ----------
 
+/** One Halo user record the verified person may act as. */
+export interface IdentityRecord {
+  u: number; // Halo user id
+  c: number; // Halo client id
+  s?: number; // Halo site id
+  cn: string; // client name
+}
+
 export interface VerifiedIdentity {
-  uid: number; // Halo user id
-  cid: number; // Halo client id
-  sid?: number; // Halo site id
+  ids: IdentityRecord[]; // >1 when the same person exists under several Halo clients
   m: "phone" | "email" | "chat"; // how they were verified
   fn: string; // first name (for friendly replies)
-  cn: string; // client name
   exp: number; // epoch seconds
 }
 
@@ -237,6 +258,12 @@ export function verifyToken(token: string, secret: string, nowSec = Math.floor(D
     throw new TokenError("malformed");
   }
   if (typeof payload.exp !== "number" || payload.exp < nowSec) throw new TokenError("expired");
-  if (!Number.isInteger(payload.uid) || !Number.isInteger(payload.cid)) throw new TokenError("malformed");
+  if (
+    !Array.isArray(payload.ids) ||
+    payload.ids.length === 0 ||
+    !payload.ids.every((r) => Number.isInteger(r?.u) && Number.isInteger(r?.c))
+  ) {
+    throw new TokenError("malformed");
+  }
   return payload;
 }

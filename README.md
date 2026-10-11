@@ -11,14 +11,19 @@ Wilma ──(Streamable HTTP + Bearer key)──► wildix-halo-mcp ──(OAuth
 | Tool | Purpose |
 |---|---|
 | `verify_caller` | Phone: caller ID → Halo user, confirmed with the stated full name + company. Fallback when caller ID doesn't match: email on file + name + company. |
-| `verify_chat_user` | Chat: email already confirmed by Wilma's one-time code → Halo user. |
+| `verify_chat_user` | Chat: email already confirmed by Wilma's one-time code → Halo user (plus the person's name when the address is a shared mailbox). |
 | `list_my_open_tickets` | The verified person's open tickets. |
 | `get_ticket_update` | Status, assigned tech and the latest **public** notes for one of their tickets. |
-| `create_ticket` | New ticket for the verified person, using the configured type, team and priority. |
+| `create_ticket` | New ticket for the verified person, using the configured type, team and priority. Takes a `company` when the person belongs to several. |
 | `add_ticket_update` | Public note on one of their open tickets. |
 
 ### Security model
 - **Verification tokens.** The verify tools return a short-lived (default 60 min) HMAC-signed token holding the Halo user, client and site IDs. Every ticket tool requires it. The LLM can't forge a token or skip verification, and the client/user IDs on tickets always come from the token, never from the model.
+- **Shared contact details.** The server sorts every match into "same person" or "different people":
+  - **Same person under several clients** (same name, same phone or email): one token covers all their records. Ticket lists span every company, and `create_ticket` asks which company. If the caller names a company that matches exactly one client, the token covers only that one.
+  - **Different people on one office line:** the stated name picks the person. Two same-named people under the same client on that line count as ambiguous, and Wilma asks for the email.
+  - **Shared mailbox in chat** (several people on one address): Wilma is asked for the person's name, and only the matching contact is verified.
+  - Phone searches page through results (up to 1,000 contacts on one number), and names are filtered before any record is fetched in full.
 - **Ownership checks happen server-side.** A ticket must belong to the verified user, or to their client if `ALLOW_CLIENT_WIDE_TICKETS=true`. "Not yours" and "doesn't exist" return the same message.
 - **Read filtering.** Reads use `excludeprivate` / `excludesys`, plus a client-side `hiddenfromuser` filter, so private notes never reach Wilma.
 - **No enumeration.** A failed verification doesn't reveal who a number or email belongs to.

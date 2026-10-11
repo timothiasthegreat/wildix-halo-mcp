@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  allSamePerson,
   companyMatches,
   nameMatches,
   normalizePhone,
@@ -61,9 +62,18 @@ describe("companyMatches", () => {
   });
 });
 
+describe("allSamePerson", () => {
+  it("treats nickname variants as one person and different names as different people", () => {
+    const mike = { id: 1, firstname: "Michael", surname: "Smith" };
+    expect(allSamePerson([mike, { id: 2, firstname: "Mike", surname: "Smith" }])).toBe(true);
+    expect(allSamePerson([mike, { id: 3, firstname: "Sarah", surname: "Jones" }])).toBe(false);
+    expect(allSamePerson([mike])).toBe(true);
+  });
+});
+
 describe("tokens", () => {
   const secret = "x".repeat(40);
-  const ident = { uid: 5, cid: 7, sid: 9, m: "phone" as const, fn: "Mike", cn: "Acme" };
+  const ident = { ids: [{ u: 5, c: 7, s: 9, cn: "Acme" }, { u: 6, c: 8, cn: "Globex" }], m: "phone" as const, fn: "Mike" };
 
   it("round-trips", () => {
     const t = signToken(ident, secret, 60);
@@ -72,7 +82,7 @@ describe("tokens", () => {
   it("rejects tampering, wrong secret and expiry", () => {
     const t = signToken(ident, secret, 60);
     const [body, sig] = t.split(".");
-    const forged = Buffer.from(JSON.stringify({ ...ident, uid: 6, exp: 9e9 })).toString("base64url");
+    const forged = Buffer.from(JSON.stringify({ ...ident, ids: [{ u: 99, c: 99, cn: "x" }], exp: 9e9 })).toString("base64url");
     expect(() => verifyToken(`${forged}.${sig}`, secret)).toThrow();
     expect(() => verifyToken(`${body}.${sig}`, "y".repeat(40))).toThrow();
     expect(() => verifyToken(t, secret, Math.floor(Date.now() / 1000) + 3601)).toThrow(/expired/);

@@ -17,34 +17,45 @@ const cfg = loadConfig({
   HALO_PRIORITY_HIGH: "2",
   HALO_UPDATE_OUTCOME_ID: "1",
   HALO_CLOSED_STATUS_IDS: "9",
-  VERIFY_ATTEMPTS_PER_15MIN: "50",
+  VERIFY_ATTEMPTS_PER_15MIN: "100",
 });
 
+const ACME = { client_id: 10, client_name: "Acme Widgets Inc." };
+const ACME_HOLD = { client_id: 30, client_name: "Acme Holdings" };
+const GLOBEX = { client_id: 20, client_name: "Globex" };
+const INITECH = { client_id: 40, client_name: "Initech" };
+const MEGA = { client_id: 50, client_name: "Megacorp" };
+
 const users: HaloUser[] = [
-  {
-    id: 101, firstname: "Michael", surname: "Smith", name: "Michael Smith", emailaddress: "mike@acme.com",
-    phonenumber: "(604) 555-1234", client_id: 10, client_name: "Acme Widgets Inc.", site_id: 11,
-  },
-  {
-    // shares the office main line with Michael
-    id: 102, firstname: "Sarah", surname: "Jones", name: "Sarah Jones", emailaddress: "sarah@acme.com",
-    phonenumber: "604-555-1234", mobilenumber: "778 555 0000", client_id: 10, client_name: "Acme Widgets Inc.", site_id: 11,
-  },
-  {
-    id: 201, firstname: "Pat", surname: "Lee", name: "Pat Lee", emailaddress: "pat@globex.com",
-    phonenumber: "250 555 9999", client_id: 20, client_name: "Globex", site_id: 21,
-  },
-  {
-    id: 301, firstname: "Old", surname: "User", emailaddress: "old@acme.com", phonenumber: "604 555 7777",
-    client_id: 10, client_name: "Acme Widgets Inc.", inactive: true,
-  },
+  // Michael exists under two clients with the same phone and email
+  { id: 101, firstname: "Michael", surname: "Smith", name: "Michael Smith", emailaddress: "mike@acme.com", phonenumber: "(604) 555-1234", site_id: 11, ...ACME },
+  { id: 103, firstname: "Mike", surname: "Smith", name: "Mike Smith", emailaddress: "mike@acme.com", phonenumber: "604 555 1234", site_id: 31, ...ACME_HOLD },
+  // shares Acme's main line with Michael
+  { id: 102, firstname: "Sarah", surname: "Jones", name: "Sarah Jones", emailaddress: "sarah@acme.com", phonenumber: "604-555-1234", ...ACME },
+  { id: 201, firstname: "Pat", surname: "Lee", name: "Pat Lee", emailaddress: "pat@globex.com", phonenumber: "250 555 9999", ...GLOBEX },
+  // Pat is also a contact at two more clients, one with a similar name
+  { id: 202, firstname: "Pat", surname: "Lee", name: "Pat Lee", emailaddress: "pat@globex.com", phonenumber: "250 555 9999", client_id: 60, client_name: "Globex Labs" },
+  { id: 203, firstname: "Patricia", surname: "Lee", name: "Patricia Lee", emailaddress: "pat@globex.com", phonenumber: "250 555 9999", ...INITECH },
+  { id: 301, firstname: "Old", surname: "User", name: "Old User", emailaddress: "old@acme.com", phonenumber: "604 555 7777", inactive: true, ...ACME },
+  // Initech: shared office@ mailbox and a main line with two different John Smiths
+  { id: 401, firstname: "Bill", surname: "Lumbergh", name: "Bill Lumbergh", emailaddress: "office@initech.com", phonenumber: "512 555 0100", ...INITECH },
+  { id: 402, firstname: "Peter", surname: "Gibbons", name: "Peter Gibbons", emailaddress: "office@initech.com", phonenumber: "512 555 0100", ...INITECH },
+  { id: 403, firstname: "John", surname: "Smith", name: "John Smith", emailaddress: "j.smith@initech.com", phonenumber: "512 555 0100", ...INITECH },
+  { id: 404, firstname: "John", surname: "Smith", name: "John Smith", emailaddress: "john.smith2@initech.com", phonenumber: "512 555 0100", ...INITECH },
+  // Megacorp: 150 contacts on one main line; the real caller is near the end
+  ...Array.from({ length: 150 }, (_, i): HaloUser =>
+    i === 140
+      ? { id: 5000 + i, firstname: "Zelda", surname: "Quinn", name: "Zelda Quinn", emailaddress: "zq@mega.com", phonenumber: "416 555 0000", ...MEGA }
+      : { id: 5000 + i, firstname: "Filler", surname: "Person", name: "Filler Person", phonenumber: "416 555 0000", ...MEGA },
+  ),
 ];
 
 const tickets: HaloTicket[] = [
-  { id: 5001, summary: "Printer jam", status_id: 2, status_name: "In Progress", user_id: 101, client_id: 10, agent_name: "Dana Tech" },
+  { id: 5001, summary: "Printer jam", status_id: 2, status_name: "In Progress", user_id: 101, client_id: 10, agent_name: "Dana Tech", lastactiondate: "2026-10-01T00:00:00Z" },
   { id: 5002, summary: "Old issue", status_id: 9, status_name: "Closed", user_id: 101, client_id: 10 },
-  { id: 6001, summary: "Globex secret", status_id: 2, status_name: "New", user_id: 201, client_id: 20 },
   { id: 5003, summary: "Sarah's laptop", status_id: 1, status_name: "New", user_id: 102, client_id: 10 },
+  { id: 7001, summary: "Holdings VPN", status_id: 1, status_name: "New", user_id: 103, client_id: 30, client_name: "Acme Holdings", lastactiondate: "2026-10-05T00:00:00Z" },
+  { id: 6001, summary: "Globex secret", status_id: 2, status_name: "New", user_id: 201, client_id: 20 },
 ];
 
 class FakeHalo implements HaloApi {
@@ -60,8 +71,11 @@ class FakeHalo implements HaloApi {
           ? [u.phonenumber, u.mobilenumber].some((p) => (p ?? "").replace(/\D/g, "").includes(s))
           : [u.emailaddress, u.name].some((f) => (f ?? "").toLowerCase().includes(s)),
       );
-      // Halo list results omit some fields; force detail lookups for phone fields
-      return { users: hits.map(({ id, name, inactive }) => ({ id, name, inactive })) } as T;
+      const size = Number(query?.page_size ?? 100);
+      const page = Number(query?.page_no ?? 1);
+      const slice = query?.pageinate ? hits.slice((page - 1) * size, page * size) : hits.slice(0, size);
+      // Halo list results omit some fields; force detail lookups for phone/email fields
+      return { users: slice.map(({ id, name, inactive }) => ({ id, name, inactive })), record_count: hits.length } as T;
     }
     const um = path.match(/^\/Users\/(\d+)$/);
     if (um) return users.find((u) => u.id === Number(um[1])) as T;
@@ -102,42 +116,42 @@ beforeEach(() => {
   svc = new WilmaService(halo, cfg);
 });
 
-async function tokenFor(name = "Mike Smith", company = "Acme") {
-  const r = await svc.verifyCaller({ caller_id: "+16045551234", full_name: name, company_name: company });
+/** Token for Michael narrowed to Acme Widgets only. */
+async function tokenFor(company = "Acme Widgets") {
+  const r = await svc.verifyCaller({ caller_id: "+16045551234", full_name: "Mike Smith", company_name: company });
   expect(r.verified).toBe(true);
   return r.token!;
 }
 
+const payload = (token: string) => JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString());
+
 describe("verifyCaller", () => {
-  it("verifies by caller ID + name + company and disambiguates a shared line", async () => {
+  it("picks the right person off a shared office line by name", async () => {
     const r = await svc.verifyCaller({ caller_id: "16045551234", full_name: "Sarah Jones", company_name: "acme widgets" });
-    expect(r).toMatchObject({ verified: true, first_name: "Sarah", company: "Acme Widgets Inc." });
+    expect(r).toMatchObject({ verified: true, first_name: "Sarah", companies: ["Acme Widgets Inc."] });
+    expect(payload(r.token!).ids.map((x: any) => x.u)).toEqual([102]);
   });
 
   it("rejects a wrong name without leaking who owns the number", async () => {
     const r = await svc.verifyCaller({ caller_id: "6045551234", full_name: "Bob Brown", company_name: "Acme" });
     expect(r.verified).toBe(false);
     expect(r.token).toBeUndefined();
-    expect(JSON.stringify(r)).not.toMatch(/Michael|Sarah|Smith|Jones/);
+    expect(JSON.stringify(r)).not.toMatch(/Michael|Sarah|Smith|Jones|Holdings/);
     expect(r.next_step).toMatch(/email/);
   });
 
-  it("rejects a wrong company", async () => {
+  it("rejects a company the person doesn't belong to", async () => {
     const r = await svc.verifyCaller({ caller_id: "6045551234", full_name: "Michael Smith", company_name: "Globex" });
     expect(r.verified).toBe(false);
   });
 
   it("falls back to email + name + company when caller ID doesn't match", async () => {
-    const r = await svc.verifyCaller({
-      caller_id: "4165550000", full_name: "Pat Lee", company_name: "Globex", email: "PAT@globex.com",
-    });
+    const r = await svc.verifyCaller({ caller_id: "4165559999", full_name: "Pat Lee", company_name: "Globex", email: "PAT@globex.com" });
     expect(r).toMatchObject({ verified: true, first_name: "Pat" });
   });
 
   it("rejects email fallback when the name doesn't match the email owner", async () => {
-    const r = await svc.verifyCaller({
-      caller_id: "4165550000", full_name: "Michael Smith", company_name: "Globex", email: "pat@globex.com",
-    });
+    const r = await svc.verifyCaller({ caller_id: "4165559999", full_name: "Michael Smith", company_name: "Globex", email: "pat@globex.com" });
     expect(r.verified).toBe(false);
   });
 
@@ -153,14 +167,108 @@ describe("verifyCaller", () => {
     await strict.verifyCaller(args);
     await expect(strict.verifyCaller(args)).rejects.toBeInstanceOf(UserFacingError);
   });
+
+  it("finds a caller beyond the first page of a large client's main line", async () => {
+    const r = await svc.verifyCaller({ caller_id: "4165550000", full_name: "Zelda Quinn", company_name: "Megacorp" });
+    expect(r.verified).toBe(true);
+    expect(payload(r.token!).ids[0].u).toBe(5140);
+    // Name filtering before detail lookups: only Zelda's record was fetched in full
+    expect(halo.gets.filter((g) => g.path.startsWith("/Users/"))).toHaveLength(1);
+  });
+
+  it("needs the email when two same-named people share a line, then picks the right one", async () => {
+    const first = await svc.verifyCaller({ caller_id: "5125550100", full_name: "John Smith", company_name: "Initech" });
+    expect(first.verified).toBe(false);
+    expect(first.next_step).toMatch(/email/);
+    const second = await svc.verifyCaller({
+      caller_id: "5125550100", full_name: "John Smith", company_name: "Initech", email: "john.smith2@initech.com",
+    });
+    expect(second.verified).toBe(true);
+    expect(payload(second.token!).ids.map((x: any) => x.u)).toEqual([404]);
+  });
+});
+
+describe("same person under several companies", () => {
+  it("a vague company verifies them across all their records", async () => {
+    const r = await svc.verifyCaller({ caller_id: "6045551234", full_name: "Michael Smith", company_name: "Acme" });
+    expect(r.verified).toBe(true);
+    expect(r.companies).toEqual(["Acme Widgets Inc.", "Acme Holdings"]);
+    expect(payload(r.token!).ids.map((x: any) => x.u)).toEqual([101, 103]);
+    expect(r.message).toMatch(/ask which company/i);
+  });
+
+  it("a company matching two of three clients still covers all of the person's records", async () => {
+    const r = await svc.verifyCaller({ caller_id: "2505559999", full_name: "Pat Lee", company_name: "Globex" });
+    expect(r.verified).toBe(true);
+    expect(payload(r.token!).ids.map((x: any) => x.u).sort()).toEqual([201, 202, 203]);
+    const exact = await svc.verifyCaller({ caller_id: "2505559999", full_name: "Pat Lee", company_name: "Initech" });
+    expect(payload(exact.token!).ids.map((x: any) => x.u)).toEqual([203]);
+  });
+
+  it("a specific company narrows the token to that record", async () => {
+    const r = await svc.verifyCaller({ caller_id: "6045551234", full_name: "Mike Smith", company_name: "Acme Holdings" });
+    expect(payload(r.token!).ids.map((x: any) => x.u)).toEqual([103]);
+  });
+
+  it("chat with an email on both records verifies across both", async () => {
+    const r = await svc.verifyChatUser({ email: "mike@acme.com" });
+    expect(r.verified).toBe(true);
+    expect(r.companies).toHaveLength(2);
+  });
+
+  it("lists open tickets from every company, tagged and newest first", async () => {
+    const r = await svc.verifyChatUser({ email: "mike@acme.com" });
+    const list = await svc.listMyOpenTickets(r.token!);
+    expect(list.tickets.map((t) => [t.ticket_id, t.company])).toEqual([
+      [7001, "Acme Holdings"],
+      [5001, "Acme Widgets Inc."],
+    ]);
+  });
+
+  it("can read and update tickets from either company but not a third company's", async () => {
+    const { token } = await svc.verifyChatUser({ email: "mike@acme.com" });
+    expect((await svc.getTicketUpdate(token!, 7001)).company).toBe("Acme Holdings");
+    await svc.addTicketUpdate(token!, 5001, "still jammed");
+    await expect(svc.getTicketUpdate(token!, 6001)).rejects.toBeInstanceOf(UserFacingError);
+    await expect(svc.getTicketUpdate(token!, 5003)).rejects.toBeInstanceOf(UserFacingError); // colleague's ticket
+  });
+
+  it("create_ticket asks which company, then files under the chosen one", async () => {
+    const { token } = await svc.verifyChatUser({ email: "mike@acme.com" });
+    const input = { summary: "New laptop setup", details: "Need a laptop set up" };
+    await expect(svc.createTicket(token!, input)).rejects.toThrow(/Acme Widgets Inc\. or Acme Holdings/);
+    await expect(svc.createTicket(token!, { ...input, company: "Acme" })).rejects.toThrow(/doesn't clearly match/);
+    await expect(svc.createTicket(token!, { ...input, company: "Globex" })).rejects.toThrow(/doesn't clearly match/);
+    expect(halo.posts).toHaveLength(0);
+
+    const r = await svc.createTicket(token!, { ...input, company: "holdings" });
+    expect(r.company).toBe("Acme Holdings");
+    expect(halo.posts[0]!.body[0]).toMatchObject({ user_id: 103, client_id: 30, site_id: 31 });
+  });
 });
 
 describe("verifyChatUser", () => {
   it("verifies an exact email match only", async () => {
-    expect((await svc.verifyChatUser({ email: "mike@acme.com" })).verified).toBe(true);
+    expect((await svc.verifyChatUser({ email: "sarah@acme.com" })).verified).toBe(true);
     expect((await svc.verifyChatUser({ email: "acme.com" })).verified).toBe(false);
     expect((await svc.verifyChatUser({ email: "nobody@acme.com" })).verified).toBe(false);
     expect((await svc.verifyChatUser({ email: "old@acme.com" })).verified).toBe(false);
+  });
+
+  it("asks for a name on a shared mailbox, then narrows to that person", async () => {
+    const first = await svc.verifyChatUser({ email: "office@initech.com" });
+    expect(first.verified).toBe(false);
+    expect(first.next_step).toMatch(/full_name/);
+    expect(JSON.stringify(first)).not.toMatch(/Bill|Peter|Lumbergh|Gibbons/);
+
+    const r = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Peter Gibbons" });
+    expect(r.verified).toBe(true);
+    expect(payload(r.token!).ids.map((x: any) => x.u)).toEqual([402]);
+  });
+
+  it("rejects a shared mailbox when the name matches nobody on it", async () => {
+    const r = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Milton Waddams" });
+    expect(r.verified).toBe(false);
   });
 });
 
@@ -168,6 +276,7 @@ describe("tickets", () => {
   it("lists only the verified user's open tickets even if Halo ignores the filter", async () => {
     const r = await svc.listMyOpenTickets(await tokenFor());
     expect(r.tickets.map((t) => t.ticket_id)).toEqual([5001]);
+    expect(r.tickets[0]).not.toHaveProperty("company");
     expect(halo.gets.find((g) => g.path === "/Tickets")?.query).toMatchObject({ user_id: 101, open_only: true });
   });
 
@@ -185,16 +294,18 @@ describe("tickets", () => {
     const other = await svc.getTicketUpdate(token, 6001).catch((e) => e);
     const colleague = await svc.getTicketUpdate(token, 5003).catch((e) => e);
     const missing = await svc.getTicketUpdate(token, 9999).catch((e) => e);
+    const otherRecord = await svc.getTicketUpdate(token, 7001).catch((e) => e); // narrowed token: Holdings not included
     expect(other).toBeInstanceOf(UserFacingError);
     expect(colleague.message).toBe(other.message);
     expect(missing.message).toBe(other.message);
+    expect(otherRecord.message).toBe(other.message);
     await expect(svc.addTicketUpdate(token, 6001, "hi")).rejects.toBeInstanceOf(UserFacingError);
     expect(halo.posts).toHaveLength(0);
   });
 
   it("allows colleague tickets when client-wide access is enabled", async () => {
     const wide = new WilmaService(halo, { ...cfg, ALLOW_CLIENT_WIDE_TICKETS: true });
-    const r = await wide.verifyCaller({ caller_id: "6045551234", full_name: "Mike Smith", company_name: "Acme" });
+    const r = await wide.verifyCaller({ caller_id: "6045551234", full_name: "Mike Smith", company_name: "Acme Widgets" });
     expect((await wide.getTicketUpdate(r.token!, 5003)).ticket_id).toBe(5003);
     await expect(wide.getTicketUpdate(r.token!, 6001)).rejects.toBeInstanceOf(UserFacingError);
   });
@@ -203,7 +314,7 @@ describe("tickets", () => {
     await expect(svc.listMyOpenTickets("not-a-token")).rejects.toBeInstanceOf(UserFacingError);
     const token = await tokenFor();
     const [, sig] = token.split(".");
-    const forged = Buffer.from(JSON.stringify({ uid: 201, cid: 20, m: "phone", fn: "x", cn: "x", exp: 9e9 })).toString("base64url");
+    const forged = Buffer.from(JSON.stringify({ ids: [{ u: 201, c: 20, cn: "x" }], m: "phone", fn: "x", exp: 9e9 })).toString("base64url");
     await expect(svc.listMyOpenTickets(`${forged}.${sig}`)).rejects.toBeInstanceOf(UserFacingError);
   });
 

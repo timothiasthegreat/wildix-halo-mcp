@@ -1,8 +1,9 @@
 import type { Config } from "./config.js";
 import { log, RateLimiter } from "./audit.js";
-import { HaloError, type HaloApi } from "./halo/client.js";
+import { HaloError, type HaloApi, type Query } from "./halo/client.js";
 import type { ActionList, HaloAction, HaloTicket, HaloUser, TicketList, UserList } from "./halo/types.js";
 import {
+  allSamePerson,
   companyMatches,
   hasPhoneFields,
   nameMatches,
@@ -11,6 +12,7 @@ import {
   TokenError,
   userPhoneNumbers,
   verifyToken,
+  type IdentityRecord,
   type VerifiedIdentity,
 } from "./identity.js";
 
@@ -21,17 +23,21 @@ export interface VerifyResult {
   verified: boolean;
   token?: string;
   first_name?: string;
-  company?: string;
+  companies?: string[];
   expires_in_minutes?: number;
   message: string;
   next_step?: string;
 }
 
 const NOT_VERIFIED =
-  "I wasn't able to verify the caller with the details provided. Do not reveal any account or ticket information.";
+  "I wasn't able to verify the person with the details provided. Do not reveal any account or ticket information.";
 const TICKET_NOT_FOUND =
   "No ticket with that number was found on this person's account. Ask them to double-check the number, or offer to list their open tickets.";
-const MAX_CANDIDATES = 25;
+const CALLBACK = "Offer to have a technician call them back.";
+
+const PAGE_SIZE = 100;
+const MAX_SEARCH_PAGES = 10; // up to 1,000 contacts on one main line
+const MAX_DETAIL_LOOKUPS = 25;
 
 export class WilmaService {
   private readonly verifyLimiter: RateLimiter;
@@ -44,23 +50,115 @@ export class WilmaService {
     this.verifyLimiter = new RateLimiter(cfg.VERIFY_ATTEMPTS_PER_15MIN, 15 * 60_000);
   }
 
+  // ---------------- Halo lookups ----------------
+
+  private async getUser(id: number): Promise<HaloUser> {
+    return this.halo.get<HaloUser>(`/Users/${id}`);
+  }
+
+  /** Paged user search; returns active users only. */
+  private async searchUsers(query: Query, maxPages = MAX_SEARCH_PAGES): Promise<HaloUser[]> {
+    const out: HaloUser[] = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await this.halo.get<UserList>("/Users", {
+        includeactive: true,
+        includeinactive: false,
+        pageinate: true,
+        page_size: PAGE_SIZE,
+        page_no: page,
+        ...query,
+      });
+      const batch = res?.users ?? [];
+      out.push(...batch);
+      const total = res?.record_count;
+      if (batch.length < PAGE_SIZE || (total !== undefined && out.length >= total)) return out.filter((u) => !u.inactive);
+    }
+    log("warn", "user_search_truncated", { pages: maxPages });
+    return out.filter((u) => !u.inactive);
+  }
+
+  /**
+   * Full user records for hits that fit the stated name. Name filtering happens on the list
+   * result first so a big main line doesn't trigger hundreds of detail lookups.
+   */
+  private async detailsForName(hits: HaloUser[], fullName: string | undefined, needsDetail: (u: HaloUser) => boolean) {
+    const shortlist = fullName ? hits.filter((h) => !(h.name || h.surname) || nameMatches(fullName, h)) : hits;
+    const out: HaloUser[] = [];
+    for (const hit of shortlist.slice(0, MAX_DETAIL_LOOKUPS)) {
+      const u = needsDetail(hit) ? await this.getUser(hit.id) : hit;
+      if (!u.inactive && (!fullName || nameMatches(fullName, u))) out.push(u);
+    }
+    if (shortlist.length > MAX_DETAIL_LOOKUPS) log("warn", "detail_lookups_capped", { shortlist: shortlist.length });
+    return out;
+  }
+
+  /** Active users whose phone/mobile numbers include `phone` and whose name fits. */
+  private async usersByPhone(phone: string, fullName: string): Promise<HaloUser[]> {
+    const hits = await this.searchUsers({ search: phone.slice(-4), search_phonenumbers: true });
+    const cc = this.cfg.DEFAULT_COUNTRY_CODE;
+    const named = await this.detailsForName(hits, fullName, (u) => !hasPhoneFields(u) || u.client_name === undefined);
+    return named.filter((u) => userPhoneNumbers(u, cc).includes(phone));
+  }
+
+  /** Active users with `email` as any of their addresses (optionally also fitting a name). */
+  private async usersByEmail(email: string, fullName?: string): Promise<HaloUser[]> {
+    const wanted = email.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(wanted)) return [];
+    const hits = await this.searchUsers({ search: wanted }, 3);
+    const users = await this.detailsForName(hits, fullName, (u) => u.emailaddress === undefined || u.client_name === undefined);
+    return users.filter((u) => [u.emailaddress, u.email2, u.email3].some((e) => (e ?? "").trim().toLowerCase() === wanted));
+  }
+
   // ---------------- Identity ----------------
 
-  private issue(user: HaloUser, method: VerifiedIdentity["m"]): VerifyResult {
-    const firstName = user.firstname || (user.name ?? "").split(" ")[0] || "there";
-    const token = signToken(
-      { uid: user.id, cid: user.client_id ?? 0, sid: user.site_id, m: method, fn: firstName, cn: user.client_name ?? "" },
-      this.cfg.TOKEN_SECRET,
-      this.cfg.TOKEN_TTL_MIN,
-    );
-    log("info", "verify_success", { method, user_id: user.id, client_id: user.client_id });
+  private matchesCompany(company: string, u: HaloUser): boolean {
+    return companyMatches(company, u.client_name) || companyMatches(company, u.site_name);
+  }
+
+  /**
+   * Given records that already share the verifying factor and fit the stated name, decide who
+   * this is. Different people → ambiguous. Same person under several clients → all of them,
+   * unless the stated company singles one client out. `company` undefined = no company check (chat).
+   *
+   * `distinctClients`: a shared phone line can't tell apart two same-named contacts under the
+   * same client (two John Smiths at Acme), so on the phone path that counts as ambiguous and the
+   * email fallback decides. An email address is personal, so same-client duplicates there are
+   * treated as duplicate records of one person.
+   */
+  private resolvePerson(
+    users: HaloUser[],
+    company?: string,
+    distinctClients = false,
+  ): HaloUser[] | "none" | "ambiguous" {
+    if (users.length === 0) return "none";
+    if (!allSamePerson(users)) return "ambiguous";
+    let chosen = users;
+    if (company !== undefined) {
+      const byCompany = users.filter((u) => this.matchesCompany(company, u));
+      if (byCompany.length === 0) return "none"; // company is a required confirmation factor on calls
+      if (new Set(byCompany.map((u) => u.client_id)).size === 1) chosen = byCompany;
+    }
+    if (distinctClients && new Set(chosen.map((u) => u.client_id)).size < chosen.length) return "ambiguous";
+    return chosen;
+  }
+
+  private issue(users: HaloUser[], method: VerifiedIdentity["m"]): VerifyResult {
+    const primary = users[0]!;
+    const firstName = primary.firstname || (primary.name ?? "").split(" ")[0] || "there";
+    const ids: IdentityRecord[] = users.map((u) => ({ u: u.id, c: u.client_id ?? 0, s: u.site_id, cn: u.client_name ?? "" }));
+    const token = signToken({ ids, m: method, fn: firstName }, this.cfg.TOKEN_SECRET, this.cfg.TOKEN_TTL_MIN);
+    const companies = [...new Set(ids.map((r) => r.cn).filter(Boolean))];
+    log("info", "verify_success", { method, user_ids: ids.map((r) => r.u), client_ids: ids.map((r) => r.c) });
     return {
       verified: true,
       token,
       first_name: firstName,
-      company: user.client_name,
+      companies,
       expires_in_minutes: this.cfg.TOKEN_TTL_MIN,
-      message: `Verified ${firstName} at ${user.client_name ?? "their company"}. Pass this token to the ticket tools for the rest of the conversation.`,
+      message:
+        companies.length > 1
+          ? `Verified ${firstName}, who has accounts with ${listOr(companies)}. Pass this token to the ticket tools. When logging a new ticket, ask which company it's for.`
+          : `Verified ${firstName} at ${companies[0] ?? "their company"}. Pass this token to the ticket tools for the rest of the conversation.`,
     };
   }
 
@@ -75,66 +173,26 @@ export class WilmaService {
     }
   }
 
-  private async getUser(id: number): Promise<HaloUser> {
-    return this.halo.get<HaloUser>(`/Users/${id}`);
-  }
-
-  private async searchUsers(query: Record<string, string | number | boolean>): Promise<HaloUser[]> {
-    const res = await this.halo.get<UserList>("/Users", {
-      includeactive: true,
-      includeinactive: false,
-      count: 100,
-      ...query,
-    });
-    return (res?.users ?? []).filter((u) => !u.inactive).slice(0, MAX_CANDIDATES);
-  }
-
-  private matchesCompany(company: string, u: HaloUser): boolean {
-    return companyMatches(company, u.client_name) || companyMatches(company, u.site_name);
-  }
-
-  private async usersByEmail(email: string): Promise<HaloUser[]> {
-    const wanted = email.trim().toLowerCase();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(wanted)) return [];
-    const hits = await this.searchUsers({ search: wanted });
-    const out: HaloUser[] = [];
-    for (const hit of hits) {
-      const u = hit.emailaddress === undefined ? await this.getUser(hit.id) : hit;
-      const emails = [u.emailaddress, u.email2, u.email3].map((e) => (e ?? "").trim().toLowerCase());
-      if (!u.inactive && emails.includes(wanted)) out.push(u);
-    }
-    return out;
-  }
-
   async verifyCaller(
     input: { caller_id: string; full_name: string; company_name: string; email?: string },
     ip = "unknown",
   ): Promise<VerifyResult> {
-    const cc = this.cfg.DEFAULT_COUNTRY_CODE;
-    const phone = normalizePhone(input.caller_id, cc);
+    const phone = normalizePhone(input.caller_id, this.cfg.DEFAULT_COUNTRY_CODE);
     this.rateLimit([`ip:${ip}`, `phone:${phone || input.caller_id}`, ...(input.email ? [`email:${input.email.toLowerCase()}`] : [])]);
 
-    // 1) Caller ID → Halo user(s) with that number, then confirm name + company.
+    // 1) Caller ID → records with that number and the stated name, confirmed by company.
     if (phone) {
-      const hits = await this.searchUsers({ search: phone.slice(-4), search_phonenumbers: true });
-      const matched: HaloUser[] = [];
-      for (const hit of hits) {
-        const u = hasPhoneFields(hit) && hit.client_name !== undefined ? hit : await this.getUser(hit.id);
-        if (u.inactive || !userPhoneNumbers(u, cc).includes(phone)) continue;
-        if (nameMatches(input.full_name, u) && this.matchesCompany(input.company_name, u)) matched.push(u);
-      }
-      if (matched.length === 1) return this.issue(matched[0]!, "phone");
-      log("info", "verify_phone_no_unique_match", { candidates: hits.length, matched: matched.length });
+      const found = this.resolvePerson(await this.usersByPhone(phone, input.full_name), input.company_name, true);
+      if (Array.isArray(found)) return this.issue(found, "phone");
+      log("info", "verify_phone_unresolved", { outcome: found });
     }
 
     // 2) Fallback: email on file + name + company must all agree.
     if (input.email) {
-      const matched = (await this.usersByEmail(input.email)).filter(
-        (u) => nameMatches(input.full_name, u) && this.matchesCompany(input.company_name, u),
-      );
-      if (matched.length === 1) return this.issue(matched[0]!, "email");
-      log("info", "verify_email_no_unique_match", { matched: matched.length });
-      return { verified: false, message: NOT_VERIFIED, next_step: "Offer to have a technician call them back." };
+      const found = this.resolvePerson(await this.usersByEmail(input.email, input.full_name), input.company_name);
+      if (Array.isArray(found)) return this.issue(found, "email");
+      log("info", "verify_email_unresolved", { outcome: found });
+      return { verified: false, message: NOT_VERIFIED, next_step: CALLBACK };
     }
 
     return {
@@ -145,18 +203,32 @@ export class WilmaService {
     };
   }
 
-  async verifyChatUser(input: { email: string }, ip = "unknown"): Promise<VerifyResult> {
+  async verifyChatUser(input: { email: string; full_name?: string }, ip = "unknown"): Promise<VerifyResult> {
     this.rateLimit([`ip:${ip}`, `email:${input.email.toLowerCase()}`]);
-    const matched = await this.usersByEmail(input.email);
-    if (matched.length === 1) return this.issue(matched[0]!, "chat");
-    log("info", "verify_chat_no_unique_match", { matched: matched.length });
-    return {
-      verified: false,
-      message:
-        matched.length > 1
-          ? "That email is shared by more than one contact, so it can't be used to verify. Offer to have a technician follow up."
-          : "That email address isn't registered with us. Do not reveal any account or ticket information; offer to have a technician follow up.",
-    };
+    const all = await this.usersByEmail(input.email);
+    if (all.length === 0) {
+      log("info", "verify_chat_unresolved", { outcome: "none" });
+      return {
+        verified: false,
+        message:
+          "That email address isn't registered with us. Do not reveal any account or ticket information; offer to have a technician follow up.",
+      };
+    }
+    if (allSamePerson(all)) return this.issue(all, "chat");
+
+    // Shared mailbox: several different people use this address. Narrow by the person's name.
+    if (!input.full_name) {
+      log("info", "verify_chat_shared_mailbox", { contacts: all.length });
+      return {
+        verified: false,
+        message: "This email address is shared by more than one person.",
+        next_step: "Ask for their full first and last name, then call verify_chat_user again with full_name.",
+      };
+    }
+    const found = this.resolvePerson(all.filter((u) => nameMatches(input.full_name!, u)));
+    if (Array.isArray(found)) return this.issue(found, "chat");
+    log("info", "verify_chat_unresolved", { outcome: found, shared: true });
+    return { verified: false, message: NOT_VERIFIED, next_step: "Offer to have a technician follow up." };
   }
 
   identityFromToken(token: string): VerifiedIdentity {
@@ -176,12 +248,16 @@ export class WilmaService {
   // ---------------- Tickets ----------------
 
   private owns(id: VerifiedIdentity, t: HaloTicket): boolean {
-    if (t.user_id === id.uid) return true;
-    return this.cfg.ALLOW_CLIENT_WIDE_TICKETS && !!id.cid && t.client_id === id.cid;
+    if (id.ids.some((r) => t.user_id === r.u)) return true;
+    return this.cfg.ALLOW_CLIENT_WIDE_TICKETS && id.ids.some((r) => !!r.c && t.client_id === r.c);
   }
 
   private isClosed(t: HaloTicket): boolean {
     return t.status_id !== undefined && this.cfg.HALO_CLOSED_STATUS_IDS.includes(t.status_id);
+  }
+
+  private companyOf(id: VerifiedIdentity, t: HaloTicket): string | undefined {
+    return t.client_name ?? id.ids.find((r) => r.u === t.user_id || r.c === t.client_id)?.cn;
   }
 
   private async getOwnedTicket(id: VerifiedIdentity, ticketId: number): Promise<HaloTicket> {
@@ -193,7 +269,7 @@ export class WilmaService {
       throw e;
     }
     if (!t || t.id !== ticketId || !this.owns(id, t)) {
-      log("warn", "ticket_ownership_denied", { user_id: id.uid, ticket_id: ticketId });
+      log("warn", "ticket_ownership_denied", { user_ids: id.ids.map((r) => r.u), ticket_id: ticketId });
       throw new UserFacingError(TICKET_NOT_FOUND);
     }
     return t;
@@ -201,22 +277,34 @@ export class WilmaService {
 
   async listMyOpenTickets(token: string) {
     const id = this.identityFromToken(token);
-    const res = await this.halo.get<TicketList>("/Tickets", {
-      ...(this.cfg.ALLOW_CLIENT_WIDE_TICKETS ? { client_id: id.cid } : { user_id: id.uid }),
-      open_only: true,
-      count: 10,
-      order: "lastactiondate",
-      orderdesc: true,
-    });
+    const filters = this.cfg.ALLOW_CLIENT_WIDE_TICKETS
+      ? [...new Set(id.ids.map((r) => r.c).filter(Boolean))].map((c) => ({ client_id: c }))
+      : id.ids.map((r) => ({ user_id: r.u }));
+    const byId = new Map<number, HaloTicket>();
+    for (const filter of filters) {
+      const res = await this.halo.get<TicketList>("/Tickets", {
+        ...filter,
+        open_only: true,
+        count: 10,
+        order: "lastactiondate",
+        orderdesc: true,
+      });
+      for (const t of res?.tickets ?? []) byId.set(t.id, t);
+    }
     // Defence in depth: never trust the filter alone.
-    const tickets = (res?.tickets ?? []).filter((t) => this.owns(id, t) && !this.isClosed(t));
-    log("info", "list_open_tickets", { user_id: id.uid, count: tickets.length });
+    const tickets = [...byId.values()]
+      .filter((t) => this.owns(id, t) && !this.isClosed(t))
+      .sort((a, b) => (Date.parse(b.lastactiondate ?? "") || 0) - (Date.parse(a.lastactiondate ?? "") || 0))
+      .slice(0, 15);
+    log("info", "list_open_tickets", { user_ids: id.ids.map((r) => r.u), count: tickets.length });
+    const multiCompany = new Set(id.ids.map((r) => r.c)).size > 1;
     return {
       count: tickets.length,
       tickets: tickets.map((t) => ({
         ticket_id: t.id,
         summary: t.summary,
         status: t.status_name,
+        ...(multiCompany ? { company: this.companyOf(id, t) } : {}),
         assigned_to: firstName(t.agent_name),
         opened: t.dateoccurred,
         last_updated: t.lastactiondate,
@@ -244,10 +332,11 @@ export class WilmaService {
         by: firstName(a.who),
         note: truncate(text, this.cfg.NOTE_CHAR_LIMIT),
       }));
-    log("info", "get_ticket_update", { user_id: id.uid, ticket_id: ticketId, notes: notes.length });
+    log("info", "get_ticket_update", { user_ids: id.ids.map((r) => r.u), ticket_id: ticketId, notes: notes.length });
     return {
       ticket_id: t.id,
       summary: t.summary,
+      company: this.companyOf(id, t),
       status: t.status_name,
       is_closed: this.isClosed(t),
       assigned_to: firstName(t.agent_name) ?? "not yet assigned",
@@ -257,15 +346,34 @@ export class WilmaService {
     };
   }
 
+  /** Which of the verified person's records a new ticket belongs to. */
+  private pickRecord(id: VerifiedIdentity, company?: string): IdentityRecord {
+    if (id.ids.length === 1) return id.ids[0]!;
+    const names = [...new Set(id.ids.map((r) => r.cn))];
+    if (!company) {
+      throw new UserFacingError(
+        `${id.fn} has accounts with ${listOr(names)}. Ask which company this ticket is for, then call create_ticket again with company.`,
+      );
+    }
+    const matches = id.ids.filter((r) => companyMatches(company, r.cn));
+    if (matches.length === 1) return matches[0]!;
+    // Several user records under one client (rare): any of them is the same person at that company.
+    if (matches.length > 1 && new Set(matches.map((r) => r.c)).size === 1) return matches[0]!;
+    throw new UserFacingError(
+      `"${company}" doesn't clearly match one of ${id.fn}'s companies. Ask whether it's for ${listOr(names)}, then call create_ticket again with that exact company name.`,
+    );
+  }
+
   async createTicket(
     token: string,
-    input: { summary: string; details: string; urgency?: "low" | "normal" | "high"; callback_number?: string },
+    input: { summary: string; details: string; urgency?: "low" | "normal" | "high"; callback_number?: string; company?: string },
   ) {
     const id = this.identityFromToken(token);
+    const rec = this.pickRecord(id, input.company);
     const summary = input.summary.trim().slice(0, 200);
 
     // Guard against the LLM double-submitting the same request.
-    const dedupeKey = `${id.uid}:${summary.toLowerCase()}`;
+    const dedupeKey = `${rec.u}:${summary.toLowerCase()}`;
     const recent = this.recentCreates.get(dedupeKey);
     if (recent && Date.now() - recent.at < 10 * 60_000) {
       return { ticket_id: recent.id, duplicate: true, message: `This was already logged as ticket ${recent.id}.` };
@@ -287,9 +395,9 @@ export class WilmaService {
       {
         summary,
         details_html: lines.join(""),
-        user_id: id.uid,
-        client_id: id.cid || undefined,
-        site_id: id.sid,
+        user_id: rec.u,
+        client_id: rec.c || undefined,
+        site_id: rec.s,
         tickettype_id: this.cfg.HALO_TICKETTYPE_ID,
         team_id: this.cfg.HALO_TEAM_ID,
         priority_id: priority,
@@ -299,10 +407,11 @@ export class WilmaService {
     const created = first(await this.halo.post<HaloTicket | HaloTicket[]>("/Tickets", body));
     if (!created?.id) throw new Error("Halo did not return a ticket id");
     this.recentCreates.set(dedupeKey, { id: created.id, at: Date.now() });
-    log("info", "ticket_created", { user_id: id.uid, client_id: id.cid, ticket_id: created.id, urgency: input.urgency });
+    log("info", "ticket_created", { user_id: rec.u, client_id: rec.c, ticket_id: created.id, urgency: input.urgency });
     return {
       ticket_id: created.id,
-      message: `Ticket ${created.id} has been logged for ${id.fn}. Read the ticket number back to them.`,
+      company: rec.cn,
+      message: `Ticket ${created.id} has been logged for ${id.fn}${id.ids.length > 1 ? ` under ${rec.cn}` : ""}. Read the ticket number back to them.`,
     };
   }
 
@@ -328,7 +437,7 @@ export class WilmaService {
       },
     ];
     const created = first(await this.halo.post<HaloAction | HaloAction[]>("/Actions", body));
-    log("info", "ticket_update_added", { user_id: id.uid, ticket_id: ticketId, action_id: created?.id });
+    log("info", "ticket_update_added", { user_ids: id.ids.map((r) => r.u), ticket_id: ticketId, action_id: created?.id });
     return { ticket_id: ticketId, message: `The update was added to ticket ${ticketId}. The assigned technician will see it.` };
   }
 }
@@ -342,6 +451,10 @@ function first<T>(x: T | T[] | undefined): T | undefined {
 function firstName(name?: string): string | undefined {
   const n = (name ?? "").trim();
   return n ? n.split(/\s+/)[0] : undefined;
+}
+
+function listOr(items: string[]): string {
+  return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
 
 function verifiedBy(m: VerifiedIdentity["m"]): string {

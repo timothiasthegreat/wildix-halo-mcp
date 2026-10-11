@@ -69,9 +69,15 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       description:
         "Verify a person in a WEB CHAT whose email address has already been confirmed with a one-time code by the chat system. " +
         "Pass that confirmed email address. Never use this for phone calls or for an email that hasn't been confirmed with a code. " +
+        "If the result says the address is shared by more than one person, ask for their full name and call again with `full_name`. " +
         "On success, returns a `token` to use with the ticket tools.",
       inputSchema: {
         email: z.string().email().describe("The email address that was confirmed by one-time code in this chat."),
+        full_name: z
+          .string()
+          .min(3)
+          .optional()
+          .describe("Person's first and last name. Only needed when asked for it (shared email address)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -83,7 +89,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
     {
       title: "List the verified person's open tickets",
       description:
-        "List the open support tickets belonging to the verified person (most recently updated first). " +
+        "List the open support tickets belonging to the verified person (most recently updated first), across all of their companies. " +
         "Use this when they ask about 'my ticket' but don't know the ticket number, then confirm which one they mean.",
       inputSchema: { token: tokenField },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -96,7 +102,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
     {
       title: "Get the status of a ticket",
       description:
-        "Get the current status, assigned technician and the most recent public updates on one of the verified person's tickets. " +
+        "Get the current status, company, assigned technician and the most recent public updates on one of the verified person's tickets. " +
         "Summarise it conversationally; don't read out dates in ISO format.",
       inputSchema: { token: tokenField, ticket_id: ticketIdField },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -125,6 +131,13 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
           .optional()
           .describe("high = they or many people can't work; low = question or minor annoyance; otherwise normal."),
         callback_number: z.string().max(40).optional().describe("Best phone number to reach them, if they gave one."),
+        company: z
+          .string()
+          .max(200)
+          .optional()
+          .describe(
+            "Which company the ticket is for. Only needed when verification said the person has accounts with more than one company.",
+          ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
