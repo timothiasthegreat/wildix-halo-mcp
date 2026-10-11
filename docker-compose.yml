@@ -41,8 +41,12 @@ services:
       TEST_SITE_ID: ${TEST_SITE_ID:-290}
       TEST_VERIFY_MODE: ${TEST_VERIFY_MODE:-always}
       TOOL_LOG_FILE: ${TOOL_LOG_FILE:-/data/tool-calls.jsonl}
+      TOOL_LOG_MAX_MB: ${TOOL_LOG_MAX_MB:-20}
       DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE:-1}
       ALLOW_CLIENT_WIDE_TICKETS: ${ALLOW_CLIENT_WIDE_TICKETS:-false}
+      MAX_PUBLIC_NOTES: ${MAX_PUBLIC_NOTES:-3}
+      NOTE_CHAR_LIMIT: ${NOTE_CHAR_LIMIT:-600}
+      VERIFY_ATTEMPTS_PER_15MIN: ${VERIFY_ATTEMPTS_PER_15MIN:-5}
     ports:
       # Bind to localhost only; publish through your reverse proxy (TLS).
       # If the proxy runs as a container, drop this and join its network instead.

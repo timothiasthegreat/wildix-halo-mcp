@@ -13,7 +13,11 @@ const intList = (def: string) =>
         .filter((n) => Number.isInteger(n)),
     );
 
-const optInt = z.coerce.number().int().positive().optional();
+// Compose passes unset optional variables through as "" — treat that as not set.
+const optInt = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+  z.coerce.number().int().positive().optional(),
+);
 const bool = (def: boolean) =>
   z
     .string()
