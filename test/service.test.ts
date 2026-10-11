@@ -45,6 +45,10 @@ const users: HaloUser[] = [
   { id: 404, firstname: "John", surname: "Smith", name: "John Smith", emailaddress: "john.smith2@initech.com", phonenumber: "512 555 0100", ...INITECH },
   // Service account (PBX alert mailbox) carrying a client's main number; Halo returns it despite the filter
   { id: 601, firstname: "unknown", surname: "unknown", name: "unknown unknown", emailaddress: "pbx@chapel.example", phonenumber: "(403) 555-7311", client_id: 70, client_name: "Example Chapel", isserviceaccount: true },
+  // Test Co. (test mode client)
+  { id: 338, firstname: "Tester", surname: "McTesterson", name: "Tester McTesterson", emailaddress: "tester@testco.example", phonenumber: "1587-597-7678", client_id: 273, client_name: "Test Co.", site_id: 290 },
+  { id: 828, firstname: "Patti", surname: "Fernandez", name: "Patti Fernandez", emailaddress: "pattif@testco.example", phonenumber: "+1 502 555 0144", client_id: 273, client_name: "Test Co.", site_id: 290 },
+  { id: 311, name: "General User", phonenumber: "(555) 555-5555", client_id: 273, client_name: "Test Co.", site_id: 290 },
   // Megacorp: 150 contacts on one main line; the real caller is near the end
   ...Array.from({ length: 150 }, (_, i): HaloUser =>
     i === 140
@@ -58,6 +62,7 @@ const tickets: HaloTicket[] = [
   { id: 5002, summary: "Old issue", status_id: 9, status_name: "Closed", user_id: 101, client_id: 10 },
   { id: 5003, summary: "Sarah's laptop", status_id: 1, status_name: "New", user_id: 102, client_id: 10 },
   { id: 7001, summary: "Holdings VPN", status_id: 1, status_name: "New", user_id: 103, client_id: 30, client_name: "Acme Holdings", lastactiondate: "2026-10-05T00:00:00Z" },
+  { id: 9001, summary: "Test printer", status_id: 2, status_name: "In Progress", user_id: 338, client_id: 273 },
   { id: 6001, summary: "Globex secret", status_id: 2, status_name: "New", user_id: 201, client_id: 20 },
 ];
 
@@ -477,5 +482,69 @@ describe("service accounts", () => {
     const note = halo.posts.find((p) => p.path === "/Actions")!.body[0].note_html;
     expect(note).not.toContain("user 601");
     expect(note).toContain("None found");
+  });
+});
+
+describe("test mode", () => {
+  const testCfg = loadConfig({ ...baseEnv, TEST_MODE: "true" });
+  let t: WilmaService;
+  beforeEach(() => {
+    t = new WilmaService(halo, testCfg);
+  });
+
+  it("defaults to Fireside's Test Co. and forces debug logging", () => {
+    expect(testCfg).toMatchObject({ TEST_CLIENT_ID: 273, TEST_USER_ID: 338, TEST_UNVERIFIED_USER_ID: 311, TEST_SITE_ID: 290, LOG_LEVEL: "debug" });
+  });
+
+  it("verifies a real client's caller as the test user, never as the real contact", async () => {
+    const r = await t.verifyCaller({ caller_id: "6045551234", full_name: "Michael Smith", company_name: "Acme Widgets" });
+    expect(r).toMatchObject({ verified: true, first_name: "Tester", companies: ["Test Co."] });
+    expect(payload(r.token!)).toMatchObject({ ids: [{ u: 338, c: 273 }], t: true });
+    for (const g of halo.gets.filter((g) => g.path === "/Users")) expect(g.query).toMatchObject({ client_id: 273 });
+  });
+
+  it("matches real test contacts, so scenarios can use specific test users", async () => {
+    const r = await t.verifyCaller({ caller_id: "5025550144", full_name: "Patti Fernandez", company_name: "Test Co" });
+    expect(payload(r.token!).ids[0].u).toBe(828);
+    const chat = await t.verifyChatUser({ email: "anyone@anywhere.com" });
+    expect(payload(chat.token!).ids[0].u).toBe(338);
+  });
+
+  it("match mode only matches test contacts and lets failures fail", async () => {
+    const strict = new WilmaService(halo, { ...testCfg, TEST_VERIFY_MODE: "match" });
+    expect((await strict.verifyCaller({ caller_id: "6045551234", full_name: "Michael Smith", company_name: "Acme" })).verified).toBe(false);
+    expect((await strict.verifyChatUser({ email: "mike@acme.com" })).verified).toBe(false);
+    expect((await strict.verifyCaller({ caller_id: "5025550144", full_name: "Patti Fernandez", company_name: "Test Co" })).verified).toBe(true);
+  });
+
+  it("test and live tokens don't cross over", async () => {
+    const testToken = (await t.verifyChatUser({ email: "x@y.com" })).token!;
+    const liveToken = (await svc.verifyChatUser({ email: "mike@acme.com" })).token!;
+    await expect(svc.listMyOpenTickets(testToken)).rejects.toBeInstanceOf(UserFacingError);
+    await expect(t.listMyOpenTickets(liveToken)).rejects.toBeInstanceOf(UserFacingError);
+  });
+
+  it("only sees test client tickets", async () => {
+    const token = (await t.verifyChatUser({ email: "x@y.com" })).token!;
+    expect((await t.listMyOpenTickets(token)).tickets.map((x) => x.ticket_id)).toEqual([9001]);
+    expect((await t.getTicketUpdate(token, 9001)).ticket_id).toBe(9001);
+    await expect(t.getTicketUpdate(token, 5001)).rejects.toBeInstanceOf(UserFacingError);
+  });
+
+  it("creates tickets under the test client, marked [TEST]", async () => {
+    const token = (await t.verifyChatUser({ email: "x@y.com" })).token!;
+    await t.createTicket(token, { summary: "Outlook broken", details: "test call from prompt dev" });
+    expect(halo.posts[0]!.body[0]).toMatchObject({ summary: "[TEST] Outlook broken", user_id: 338, client_id: 273, site_id: 290 });
+  });
+
+  it("files unverified requests under the test General User and only suggests test contacts", async () => {
+    await t.logUnverifiedRequest({
+      channel: "phone", stated_name: "Michael Smith", stated_company: "Acme Widgets", caller_id: "6045551234",
+      summary: "Locked out", details: "Can't sign in",
+    });
+    const ticket = halo.posts.find((p) => p.path === "/Tickets")!.body[0];
+    expect(ticket).toMatchObject({ summary: "[TEST] [Unverified] Locked out", user_id: 311, client_id: 273, site_id: 290 });
+    const note = halo.posts.find((p) => p.path === "/Actions")!.body[0].note_html;
+    expect(note).not.toMatch(/user 10\d|Acme/);
   });
 });

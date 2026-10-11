@@ -61,6 +61,19 @@ const schema = z.object({
   UNVERIFIED_REQUESTS_PER_HOUR: z.coerce.number().int().min(1).default(3), // per caller ID / email / IP
   UNVERIFIED_REQUESTS_GLOBAL_PER_HOUR: z.coerce.number().int().min(1).default(30),
 
+  // Test mode: everything is confined to one Halo test client, and every tool call is
+  // logged verbatim (arguments + results) to TOOL_LOG_FILE for prompt development.
+  TEST_MODE: bool(false),
+  TEST_CLIENT_ID: z.coerce.number().int().positive().default(273), // Fireside "Test Co."
+  TEST_USER_ID: z.coerce.number().int().positive().default(338), // Tester McTesterson
+  TEST_UNVERIFIED_USER_ID: z.coerce.number().int().positive().default(311), // Test Co. General User
+  TEST_SITE_ID: z.coerce.number().int().positive().default(290), // Test Co. Main Office
+  // always = anything that doesn't match a test contact verifies as TEST_USER_ID
+  // match  = real matching, but only against the test client's contacts
+  TEST_VERIFY_MODE: z.enum(["always", "match"]).default("always"),
+  TOOL_LOG_FILE: z.string().default("/data/tool-calls.jsonl"),
+  TOOL_LOG_MAX_MB: z.coerce.number().positive().default(20),
+
   // Behaviour
   DEFAULT_COUNTRY_CODE: z.string().regex(/^\d{1,3}$/).default("1"),
   ALLOW_CLIENT_WIDE_TICKETS: bool(false),
@@ -77,5 +90,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
     throw new Error(`Invalid configuration:\n${issues}`);
   }
-  return parsed.data;
+  // Test mode always logs verbosely.
+  return parsed.data.TEST_MODE ? { ...parsed.data, LOG_LEVEL: "debug" } : parsed.data;
 }

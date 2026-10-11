@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { log, RateLimiter, setLogLevel } from "./audit.js";
 import { HaloClient } from "./halo/client.js";
 import { WilmaService } from "./service.js";
+import { ToolCallLog } from "./toolLog.js";
 import { buildMcpServer } from "./tools.js";
 
 const cfg = loadConfig();
@@ -23,6 +24,17 @@ const halo = new HaloClient({
   scope: cfg.HALO_SCOPE,
 });
 const svc = new WilmaService(halo, cfg);
+
+const toolLog = cfg.TEST_MODE ? new ToolCallLog(cfg.TOOL_LOG_FILE, cfg.TOOL_LOG_MAX_MB * 1024 * 1024) : undefined;
+if (cfg.TEST_MODE) {
+  log("warn", "TEST_MODE_ENABLED", {
+    test_client_id: cfg.TEST_CLIENT_ID,
+    test_user_id: cfg.TEST_USER_ID,
+    verify_mode: cfg.TEST_VERIFY_MODE,
+    tool_log: cfg.TOOL_LOG_FILE,
+    note: "All lookups and tickets are confined to the test client; tool calls are logged verbatim.",
+  });
+}
 
 const app = express();
 app.set("trust proxy", true); // runs behind a TLS reverse proxy
@@ -47,12 +59,29 @@ function requireApiKey(req: Request, res: Response, next: NextFunction) {
 }
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, ...(cfg.TEST_MODE ? { test_mode: true } : {}) });
 });
+
+if (toolLog) {
+  // Test mode only: recent tool calls as JSON, e.g. GET /debug/tool-calls?limit=20
+  app.get("/debug/tool-calls", requireApiKey, async (req: Request, res: Response) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+    res.json({ file: toolLog.file, entries: await toolLog.tail(limit) });
+  });
+}
 
 // Stateless Streamable HTTP: a fresh server + transport per request.
 app.post("/mcp", requireApiKey, async (req: Request, res: Response) => {
-  const server = buildMcpServer(svc, () => req.ip ?? "unknown");
+  const info = { ip: req.ip ?? "unknown", userAgent: req.get("user-agent") };
+  if (toolLog) {
+    // Record non-tool traffic too (initialize, tools/list, ...) to see how Wilma connects.
+    for (const msg of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (msg?.method && msg.method !== "tools/call") {
+        toolLog.write({ kind: "rpc", method: msg.method, params: msg.params, ip: info.ip, user_agent: info.userAgent });
+      }
+    }
+  }
+  const server = buildMcpServer(svc, () => info, toolLog);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => {
     void transport.close();

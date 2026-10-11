@@ -231,6 +231,7 @@ export interface VerifiedIdentity {
   ids: IdentityRecord[]; // >1 when the same person exists under several Halo clients
   m: "phone" | "email" | "chat"; // how they were verified
   fn: string; // first name (for friendly replies)
+  t?: boolean; // issued in test mode; only valid in test mode
   exp: number; // epoch seconds
 }
 

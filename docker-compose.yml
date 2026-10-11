@@ -32,12 +32,25 @@ services:
       HALO_UNVERIFIED_SITE_ID: ${HALO_UNVERIFIED_SITE_ID:-1}
       UNVERIFIED_REQUESTS_PER_HOUR: ${UNVERIFIED_REQUESTS_PER_HOUR:-3}
       UNVERIFIED_REQUESTS_GLOBAL_PER_HOUR: ${UNVERIFIED_REQUESTS_GLOBAL_PER_HOUR:-30}
+      # Test mode: confine everything to Halo "Test Co." and log every tool call to /data
+      TEST_MODE: ${TEST_MODE:-false}
+      TEST_CLIENT_ID: ${TEST_CLIENT_ID:-273}
+      TEST_USER_ID: ${TEST_USER_ID:-338}
+      TEST_UNVERIFIED_USER_ID: ${TEST_UNVERIFIED_USER_ID:-311}
+      TEST_SITE_ID: ${TEST_SITE_ID:-290}
+      TEST_VERIFY_MODE: ${TEST_VERIFY_MODE:-always}
+      TOOL_LOG_FILE: ${TOOL_LOG_FILE:-/data/tool-calls.jsonl}
       DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE:-1}
       ALLOW_CLIENT_WIDE_TICKETS: ${ALLOW_CLIENT_WIDE_TICKETS:-false}
     ports:
       # Bind to localhost only; publish through your reverse proxy (TLS).
       # If the proxy runs as a container, drop this and join its network instead.
       - "127.0.0.1:3000:3000"
+    volumes:
+      - wildix-halo-mcp-data:/data
     read_only: true
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  wildix-halo-mcp-data:

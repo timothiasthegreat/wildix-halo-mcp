@@ -61,6 +61,28 @@ npx @modelcontextprotocol/inspector   # Streamable HTTP, URL above, header Autho
 - Header: `Authorization: Bearer <MCP_API_KEY>` (`X-API-Key: <MCP_API_KEY>` also works)
 - Instructions: start from [docs/wilma-instructions.md](docs/wilma-instructions.md). Wilma must pass the call's caller ID to `verify_caller`.
 
+## Test mode (prompt development)
+Set `TEST_MODE=true` to rehearse calls and chats with Wilma without touching real clients:
+- **Confined to one test client.** Every user search, ticket read and write, and unverified request is restricted to `TEST_CLIENT_ID` (Fireside's "Test Co.", client 273). Ticket summaries are prefixed `[TEST]`. Tickets outside the test client are refused, even by ID.
+- **Verification:**
+  - `TEST_VERIFY_MODE=always` (default): callers who match a Test Co. contact verify as that contact. Anyone else, whatever name, number or email they give, verifies as `TEST_USER_ID` (Tester McTesterson, 338).
+  - `TEST_VERIFY_MODE=match`: real matching against Test Co. contacts only, so you can rehearse failed verifications and the unverified-request flow.
+- **Unverified requests** go to Test Co.'s General User (311) instead of the Unknown client.
+- **Separate tokens.** Tokens issued in test mode are rejected in live mode and vice versa.
+- **Verbose logging.**
+  - `LOG_LEVEL` is forced to `debug`.
+  - Every request from Wilma is appended to `TOOL_LOG_FILE` (default `/data/tool-calls.jsonl`, on the `wildix-halo-mcp-data` volume): `initialize`, `tools/list`, and each tool call with its exact arguments, result, errors and timing. Tokens are shortened in the log.
+  - The file rotates to `.1` past `TOOL_LOG_MAX_MB`.
+- **View the log:**
+  - `GET /debug/tool-calls?limit=50` with the same Bearer key returns the latest entries. This endpoint exists only in test mode.
+  - Or open a shell on the container in Portainer and `cat /data/tool-calls.jsonl`.
+
+```bash
+curl -s -H "Authorization: Bearer $MCP_API_KEY" "https://wilma-halo.example.com/debug/tool-calls?limit=20"
+```
+
+`/healthz` reports `"test_mode": true` while it's on. Prefer a separate test stack or Wilma agent rather than flipping a live one.
+
 ## Configuration reference
 See [.env.example](.env.example). Notable settings:
 - `HALO_CLOSED_STATUS_IDS`: statuses treated as closed (no updates allowed; hidden from the open list). Default `9`.

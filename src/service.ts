@@ -66,6 +66,15 @@ export class WilmaService {
     return !u.inactive && u.isserviceaccount !== true;
   }
 
+  /**
+   * Test mode confines everything to the test client. `strict` requires client_id to be
+   * present (full records); list results without it are let through to the detail lookup.
+   */
+  private inScope(clientId: number | undefined, strict = true): boolean {
+    if (!this.cfg.TEST_MODE) return true;
+    return clientId === this.cfg.TEST_CLIENT_ID || (!strict && clientId === undefined);
+  }
+
   /** Paged user search; returns active, non-service-account users only. */
   private async searchUsers(query: Query, maxPages = MAX_SEARCH_PAGES): Promise<HaloUser[]> {
     const out: HaloUser[] = [];
@@ -79,14 +88,15 @@ export class WilmaService {
         page_size: PAGE_SIZE,
         page_no: page,
         ...query,
+        ...(this.cfg.TEST_MODE ? { client_id: this.cfg.TEST_CLIENT_ID } : {}),
       });
       const batch = res?.users ?? [];
       out.push(...batch);
       const total = res?.record_count;
-      if (batch.length < PAGE_SIZE || (total !== undefined && out.length >= total)) return out.filter((u) => this.isPerson(u));
+      if (batch.length < PAGE_SIZE || (total !== undefined && out.length >= total)) return out.filter((u) => this.isPerson(u) && this.inScope(u.client_id, false));
     }
     log("warn", "user_search_truncated", { pages: maxPages });
-    return out.filter((u) => this.isPerson(u));
+    return out.filter((u) => this.isPerson(u) && this.inScope(u.client_id, false));
   }
 
   /**
@@ -98,7 +108,7 @@ export class WilmaService {
     const out: HaloUser[] = [];
     for (const hit of shortlist.slice(0, MAX_DETAIL_LOOKUPS)) {
       const u = needsDetail(hit) ? await this.getUser(hit.id) : hit;
-      if (this.isPerson(u) && (!fullName || nameMatches(fullName, u))) out.push(u);
+      if (this.isPerson(u) && this.inScope(u.client_id) && (!fullName || nameMatches(fullName, u))) out.push(u);
     }
     if (shortlist.length > MAX_DETAIL_LOOKUPS) log("warn", "detail_lookups_capped", { shortlist: shortlist.length });
     return out;
@@ -155,10 +165,15 @@ export class WilmaService {
   }
 
   private issue(users: HaloUser[], method: VerifiedIdentity["m"]): VerifyResult {
+    if (!users.every((u) => this.inScope(u.client_id))) throw new Error("test mode: refusing to verify outside the test client");
     const primary = users[0]!;
     const firstName = primary.firstname || (primary.name ?? "").split(" ")[0] || "there";
     const ids: IdentityRecord[] = users.map((u) => ({ u: u.id, c: u.client_id ?? 0, s: u.site_id, cn: u.client_name ?? "" }));
-    const token = signToken({ ids, m: method, fn: firstName }, this.cfg.TOKEN_SECRET, this.cfg.TOKEN_TTL_MIN);
+    const token = signToken(
+      { ids, m: method, fn: firstName, ...(this.cfg.TEST_MODE ? { t: true } : {}) },
+      this.cfg.TOKEN_SECRET,
+      this.cfg.TOKEN_TTL_MIN,
+    );
     const companies = [...new Set(ids.map((r) => r.cn).filter(Boolean))];
     log("info", "verify_success", { method, user_ids: ids.map((r) => r.u), client_ids: ids.map((r) => r.c) });
     return {
@@ -189,6 +204,25 @@ export class WilmaService {
     input: { caller_id: string; full_name: string; company_name: string; email?: string },
     ip = "unknown",
   ): Promise<VerifyResult> {
+    return this.withTestFallback(await this.verifyCallerInner(input, ip), "phone");
+  }
+
+  async verifyChatUser(input: { email: string; full_name?: string }, ip = "unknown"): Promise<VerifyResult> {
+    return this.withTestFallback(await this.verifyChatUserInner(input, ip), "chat");
+  }
+
+  /** Test mode "always": anyone who didn't match a test contact verifies as the default test user. */
+  private async withTestFallback(result: VerifyResult, method: VerifiedIdentity["m"]): Promise<VerifyResult> {
+    if (result.verified || !this.cfg.TEST_MODE || this.cfg.TEST_VERIFY_MODE !== "always") return result;
+    const user = await this.getUser(this.cfg.TEST_USER_ID);
+    log("info", "test_default_user", { user_id: user.id });
+    return this.issue([user], method);
+  }
+
+  private async verifyCallerInner(
+    input: { caller_id: string; full_name: string; company_name: string; email?: string },
+    ip: string,
+  ): Promise<VerifyResult> {
     const phone = normalizePhone(input.caller_id, this.cfg.DEFAULT_COUNTRY_CODE);
     this.rateLimit([`ip:${ip}`, `phone:${phone || input.caller_id}`, ...(input.email ? [`email:${input.email.toLowerCase()}`] : [])]);
 
@@ -215,7 +249,7 @@ export class WilmaService {
     };
   }
 
-  async verifyChatUser(input: { email: string; full_name?: string }, ip = "unknown"): Promise<VerifyResult> {
+  private async verifyChatUserInner(input: { email: string; full_name?: string }, ip: string): Promise<VerifyResult> {
     this.rateLimit([`ip:${ip}`, `email:${input.email.toLowerCase()}`]);
     const all = await this.usersByEmail(input.email);
     if (all.length === 0) {
@@ -245,7 +279,9 @@ export class WilmaService {
 
   identityFromToken(token: string): VerifiedIdentity {
     try {
-      return verifyToken(token, this.cfg.TOKEN_SECRET);
+      const id = verifyToken(token, this.cfg.TOKEN_SECRET);
+      if (!!id.t !== this.cfg.TEST_MODE) throw new TokenError(id.t ? "test token outside test mode" : "live token in test mode");
+      return id;
     } catch (e) {
       const reason = e instanceof TokenError ? e.message : "invalid";
       log("warn", "token_rejected", { reason });
@@ -260,6 +296,7 @@ export class WilmaService {
   // ---------------- Tickets ----------------
 
   private owns(id: VerifiedIdentity, t: HaloTicket): boolean {
+    if (!this.inScope(t.client_id)) return false;
     if (id.ids.some((r) => t.user_id === r.u)) return true;
     return this.cfg.ALLOW_CLIENT_WIDE_TICKETS && id.ids.some((r) => !!r.c && t.client_id === r.c);
   }
@@ -382,7 +419,8 @@ export class WilmaService {
   ) {
     const id = this.identityFromToken(token);
     const rec = this.pickRecord(id, input.company);
-    const summary = input.summary.trim().slice(0, 200);
+    if (!this.inScope(rec.c)) throw new Error("test mode: refusing to create a ticket outside the test client");
+    const summary = `${this.cfg.TEST_MODE ? "[TEST] " : ""}${input.summary.trim()}`.slice(0, 200);
 
     // Guard against the LLM double-submitting the same request.
     const dedupeKey = `${rec.u}:${summary.toLowerCase()}`;
@@ -401,7 +439,7 @@ export class WilmaService {
     const lines = [
       `<p>${escapeHtml(input.details.trim()).replace(/\r?\n/g, "<br>")}</p>`,
       input.callback_number ? `<p><b>Callback number:</b> ${escapeHtml(input.callback_number)}</p>` : "",
-      `<p><i>Logged by Wilma (Wildix AI) via ${channel}. Identity verified by ${verifiedBy(id.m)}.</i></p>`,
+      `<p><i>Logged by Wilma (Wildix AI) via ${channel}. ${id.t ? "TEST MODE — identity not verified against real contacts" : `Identity verified by ${verifiedBy(id.m)}`}.</i></p>`,
     ];
     const body = [
       {
@@ -449,7 +487,8 @@ export class WilmaService {
     },
     ip = "unknown",
   ) {
-    const userId = this.cfg.HALO_UNVERIFIED_USER_ID;
+    const test = this.cfg.TEST_MODE;
+    const userId = test ? this.cfg.TEST_UNVERIFIED_USER_ID : this.cfg.HALO_UNVERIFIED_USER_ID;
     if (!userId) {
       throw new UserFacingError("Unverified requests aren't enabled. Offer to take their name and number for a callback another way.");
     }
@@ -463,7 +502,7 @@ export class WilmaService {
       );
     }
 
-    const summary = `[Unverified] ${input.summary.trim()}`.slice(0, 200);
+    const summary = `${test ? "[TEST] " : ""}[Unverified] ${input.summary.trim()}`.slice(0, 200);
     const dedupeKey = `unverified:${keys[1]}:${summary.toLowerCase()}`;
     const recent = this.recentCreates.get(dedupeKey);
     if (recent && Date.now() - recent.at < 10 * 60_000) {
@@ -494,8 +533,8 @@ export class WilmaService {
           summary,
           details_html: details,
           user_id: userId,
-          client_id: this.cfg.HALO_UNVERIFIED_CLIENT_ID,
-          site_id: this.cfg.HALO_UNVERIFIED_SITE_ID,
+          client_id: test ? this.cfg.TEST_CLIENT_ID : this.cfg.HALO_UNVERIFIED_CLIENT_ID,
+          site_id: test ? this.cfg.TEST_SITE_ID : this.cfg.HALO_UNVERIFIED_SITE_ID,
           tickettype_id: this.cfg.HALO_TICKETTYPE_ID,
           team_id: this.cfg.HALO_TEAM_ID,
           priority_id: this.cfg.HALO_PRIORITY_NORMAL, // unverified callers can't escalate
@@ -560,7 +599,9 @@ export class WilmaService {
     if (email) (await this.usersByEmail(email)).forEach((u) => describe(u, "email matches"));
     if (company) {
       const res = await this.halo.get<ClientList>("/Client", { search: company, count: 25 });
-      const clients = (res?.clients ?? []).filter((c) => !c.inactive && companyMatches(company, c.name)).slice(0, 3);
+      const clients = (res?.clients ?? [])
+        .filter((c) => !c.inactive && this.inScope(c.id) && companyMatches(company, c.name))
+        .slice(0, 3);
       const last = normalizeText(name).split(" ").pop();
       for (const c of clients) {
         const users = last ? await this.searchUsers({ client_id: c.id, search: last }, 1) : [];

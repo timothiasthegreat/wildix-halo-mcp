@@ -3,6 +3,12 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { log } from "./audit.js";
 import { UserFacingError, type WilmaService } from "./service.js";
+import type { ToolCallLog } from "./toolLog.js";
+
+export interface RequestInfo {
+  ip: string;
+  userAgent?: string;
+}
 
 const INSTRUCTIONS = `Tools for helping a Fireside IT client contact with their support tickets in HaloPSA.
 Always verify the person first (verify_caller for phone calls, verify_chat_user for chat), then pass the returned token to every ticket tool.
@@ -26,21 +32,46 @@ function fail(message: string): CallToolResult {
   return { isError: true, content: [{ type: "text", text: message }] };
 }
 
-async function run(tool: string, fn: () => Promise<unknown>): Promise<CallToolResult> {
+async function execute(tool: string, fn: () => Promise<unknown>): Promise<{ result: CallToolResult; error?: string }> {
   try {
-    return ok(await fn());
+    return { result: ok(await fn()) };
   } catch (e) {
-    if (e instanceof UserFacingError) return fail(e.message);
-    log("error", "tool_failed", { tool, error: e instanceof Error ? e.message : String(e) });
-    return fail(
-      "The ticketing system could not be reached right now. Apologise, and offer to have a technician follow up instead of retrying repeatedly.",
-    );
+    if (e instanceof UserFacingError) return { result: fail(e.message) };
+    const error = e instanceof Error ? e.message : String(e);
+    log("error", "tool_failed", { tool, error });
+    return {
+      error,
+      result: fail(
+        "The ticketing system could not be reached right now. Apologise, and offer to have a technician follow up instead of retrying repeatedly.",
+      ),
+    };
   }
 }
 
-/** Build a fresh MCP server instance. `getIp` lets rate limits key on the HTTP client. */
-export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServer {
+/**
+ * Build a fresh MCP server instance. `getReq` gives the HTTP client's IP (for rate limits)
+ * and user agent. With `toolLog` (test mode), every call's arguments and result are recorded.
+ */
+export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, toolLog?: ToolCallLog): McpServer {
   const server = new McpServer({ name: "wildix-halo-mcp", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  const getIp = () => getReq().ip;
+
+  const run = async (tool: string, args: unknown, fn: () => Promise<unknown>): Promise<CallToolResult> => {
+    const started = Date.now();
+    const { result, error } = await execute(tool, fn);
+    toolLog?.write({
+      kind: "tool_call",
+      tool,
+      args,
+      is_error: result.isError === true,
+      result: result.structuredContent ?? result.content.map((c) => (c.type === "text" ? c.text : c.type)).join("\n"),
+      ...(error ? { internal_error: error } : {}),
+      ms: Date.now() - started,
+      ip: getReq().ip,
+      user_agent: getReq().userAgent,
+    });
+    return result;
+  };
 
   server.registerTool(
     "verify_caller",
@@ -59,7 +90,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    (args) => run("verify_caller", () => svc.verifyCaller(args, getIp())),
+    (args) => run("verify_caller", args, () => svc.verifyCaller(args, getIp())),
   );
 
   server.registerTool(
@@ -81,7 +112,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    (args) => run("verify_chat_user", () => svc.verifyChatUser(args, getIp())),
+    (args) => run("verify_chat_user", args, () => svc.verifyChatUser(args, getIp())),
   );
 
   server.registerTool(
@@ -94,7 +125,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       inputSchema: { token: tokenField },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    ({ token }) => run("list_my_open_tickets", () => svc.listMyOpenTickets(token)),
+    (args) => run("list_my_open_tickets", args, () => svc.listMyOpenTickets(args.token)),
   );
 
   server.registerTool(
@@ -107,7 +138,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       inputSchema: { token: tokenField, ticket_id: ticketIdField },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    ({ token, ticket_id }) => run("get_ticket_update", () => svc.getTicketUpdate(token, ticket_id)),
+    (args) => run("get_ticket_update", args, () => svc.getTicketUpdate(args.token, args.ticket_id)),
   );
 
   server.registerTool(
@@ -141,7 +172,11 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    ({ token, ...input }) => run("create_ticket", () => svc.createTicket(token, input)),
+    (args) =>
+      run("create_ticket", args, () => {
+        const { token, ...input } = args;
+        return svc.createTicket(token, input);
+      }),
   );
 
   server.registerTool(
@@ -158,7 +193,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    ({ token, ticket_id, note }) => run("add_ticket_update", () => svc.addTicketUpdate(token, ticket_id, note)),
+    (args) => run("add_ticket_update", args, () => svc.addTicketUpdate(args.token, args.ticket_id, args.note)),
   );
 
   server.registerTool(
@@ -188,7 +223,7 @@ export function buildMcpServer(svc: WilmaService, getIp: () => string): McpServe
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => run("log_unverified_request", () => svc.logUnverifiedRequest(args, getIp())),
+    (args) => run("log_unverified_request", args, () => svc.logUnverifiedRequest(args, getIp())),
   );
 
   return server;
