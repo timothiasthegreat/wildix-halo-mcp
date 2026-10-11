@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "./config.js";
@@ -28,14 +28,32 @@ export function createApp(cfg: Config, svc: WilmaService, toolLog?: ToolCallLog)
 
   const expectedKey = Buffer.from(cfg.MCP_API_KEY);
   const authFailures = new RateLimiter(20, 15 * 60_000);
+  log("info", "mcp_api_key_loaded", { key_fp: keyFingerprint(cfg.MCP_API_KEY), key_length: cfg.MCP_API_KEY.length });
 
   function requireApiKey(req: Request, res: Response, next: NextFunction) {
     const header = req.get("authorization") ?? "";
-    const presented = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : (req.get("x-api-key") ?? "");
+    const xApiKey = req.get("x-api-key");
+    const presented = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : (xApiKey ?? "").trim();
     const given = Buffer.from(presented);
     if (given.length === expectedKey.length && timingSafeEqual(given, expectedKey)) return next();
     const ip = req.ip ?? "unknown";
-    log("warn", "mcp_auth_failed", { ip });
+    const credentials = header.toLowerCase().startsWith("bearer ")
+      ? "bearer"
+      : header
+        ? `authorization:${header.split(" ")[0]?.slice(0, 20)}`
+        : xApiKey !== undefined
+          ? "x-api-key"
+          : "none";
+    // No key at all is almost always an internet scanner; a wrong key is a misconfiguration.
+    log(credentials === "none" ? "info" : "warn", credentials === "none" ? "mcp_unauthenticated" : "mcp_auth_failed", {
+      ip,
+      method: req.method,
+      path: req.path,
+      credentials,
+      ...(presented ? { key_fp: keyFingerprint(presented), key_length: presented.length } : {}),
+      user_agent: req.get("user-agent")?.slice(0, 160),
+      forwarded_for: req.get("x-forwarded-for"),
+    });
     if (!authFailures.take(ip)) {
       res.status(429).json({ error: "too_many_requests" });
       return;
@@ -83,6 +101,8 @@ export function createApp(cfg: Config, svc: WilmaService, toolLog?: ToolCallLog)
     }
   };
 
+  // GET/DELETE aren't used in stateless mode. Answer without an auth check so crawlers probing
+  // "/" don't show up as failed logins.
   const methodNotAllowed = (_req: Request, res: Response) => {
     res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
   };
@@ -100,9 +120,14 @@ export function createApp(cfg: Config, svc: WilmaService, toolLog?: ToolCallLog)
       continue;
     }
     app.post(paths, requireApiKey, handleMcp(channel));
-    app.get(paths, requireApiKey, methodNotAllowed);
-    app.delete(paths, requireApiKey, methodNotAllowed);
+    app.get(paths, methodNotAllowed);
+    app.delete(paths, methodNotAllowed);
   }
 
   return app;
+}
+
+/** Short, non-reversible fingerprint so logs can show whether two keys match without revealing either. */
+export function keyFingerprint(key: string): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, 8);
 }

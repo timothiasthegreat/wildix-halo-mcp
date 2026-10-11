@@ -1,12 +1,13 @@
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { log, setLogLevel } from "./audit.js";
+import { log, setLogFormat, setLogLevel } from "./audit.js";
 import { HaloClient } from "./halo/client.js";
 import { WilmaService } from "./service.js";
 import { ToolCallLog } from "./toolLog.js";
 
 const cfg = loadConfig();
 setLogLevel(cfg.LOG_LEVEL);
+setLogFormat(cfg.LOG_FORMAT);
 
 for (const key of ["HALO_TICKETTYPE_ID", "HALO_UPDATE_OUTCOME_ID"] as const) {
   if (cfg[key] === undefined) log("warn", "config_default_missing", { key, note: "Halo defaults will be used" });

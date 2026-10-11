@@ -1,7 +1,7 @@
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApp, keyFingerprint } from "../src/app.js";
 import { loadConfig, type Config } from "../src/config.js";
 import type { HaloApi } from "../src/halo/client.js";
 import { WilmaService } from "../src/service.js";
@@ -115,6 +115,52 @@ describe("channel endpoints", () => {
     const base = await start();
     for (const path of ["/mcp/voice", "/mcp/chat", "/mcp", "/"]) {
       expect((await rpc(base, path, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "wrong")).status).toBe(401);
+    }
+  });
+});
+
+describe("auth logging", () => {
+  it("GET on MCP paths answers 405 without a key and logs nothing", async () => {
+    const base = await start();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      for (const path of ["/", "/mcp", "/mcp/voice"]) expect((await fetch(base + path)).status).toBe(405);
+      expect([...spy.mock.calls, ...out.mock.calls].join("\n")).not.toMatch(/mcp_auth_failed|mcp_unauthenticated/);
+    } finally {
+      spy.mockRestore();
+      out.mockRestore();
+    }
+  });
+
+  it("a wrong key logs a warning with detail and a fingerprint, never the key", async () => {
+    const base = await start();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const wrong = "w".repeat(32);
+      await rpc(base, "/mcp/voice", { jsonrpc: "2.0", id: 1, method: "tools/list" }, wrong);
+      const line = spy.mock.calls.map((c) => String(c[0])).find((l) => l.includes("mcp_auth_failed"))!;
+      const entry = JSON.parse(line);
+      expect(entry).toMatchObject({ level: "warn", method: "POST", path: "/mcp/voice", credentials: "bearer", key_fp: keyFingerprint(wrong), key_length: 32 });
+      expect(line).not.toContain(wrong);
+      expect(line).not.toContain(KEY);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("no key at all is logged at info as unauthenticated", async () => {
+    const base = await start();
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await fetch(base + "/", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      expect(res.status).toBe(401);
+      expect(out.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/"event":"mcp_unauthenticated".*"credentials":"none"/);
+      expect(err.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/mcp_auth_failed/);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
     }
   });
 });

@@ -72,7 +72,7 @@ async function execute(tool: string, fn: () => Promise<unknown>): Promise<{ resu
 export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, opts: BuildOptions = {}): McpServer {
   const channel = opts.channel ?? "all";
   const toolLog = opts.toolLog;
-  const server = new McpServer({ name: "wildix-halo-mcp", version: "0.2.0" }, { instructions: instructions(channel) });
+  const server = new McpServer({ name: "wildix-halo-mcp", version: "0.2.1" }, { instructions: instructions(channel) });
   const getIp = () => getReq().ip;
   const tokenField = z
     .string()

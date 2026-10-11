@@ -70,7 +70,11 @@ If no tools appear:
 - **`Cannot POST /`** means the request reached the container at `/` and the image is 0.1.0. Update to 0.2.0 or later and use the `/mcp/voice` or `/mcp/chat` URL.
 - **`/mcp/voice` or `/mcp/chat` not found** means the image is older than 0.2.0. Update it.
 - Check that the key matches `MCP_API_KEY` exactly.
-- Check the container logs in Portainer. A `mcp_auth_failed` entry means the key or header is wrong; no entry at all means the request isn't reaching the container (proxy or DNS).
+- Check the container logs in Portainer:
+  - **`mcp_auth_failed`** means a key was sent but it's wrong. Compare its `key_fp` with the `key_fp` in the `mcp_api_key_loaded` line logged at startup. If they differ, Wildix has a different key from `MCP_API_KEY`. `key_length` helps spot a stray space or a truncated paste. The key itself is never logged.
+  - **`mcp_unauthenticated`** (info level) means no key was sent at all. A steady trickle of these from unknown user agents is internet scanners probing your public hostname, and is harmless. If it lines up with Wildix connecting, the Authorization setting is **None** or the header name is wrong.
+  - **No entry at all** means the request isn't reaching the container (proxy or DNS).
+  - Each entry includes the method, path, user agent and `forwarded_for`. If `ip` is a Docker gateway address such as `172.20.0.1`, your proxy isn't passing the client address on; `forwarded_for` shows it when the proxy sets `X-Forwarded-For`.
 
 ## 3. Attach it to the agent and add the instructions
 

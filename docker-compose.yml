@@ -10,6 +10,8 @@ services:
     environment:
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # text reads cleanly in Portainer's log viewer; json suits log shippers
+      LOG_FORMAT: ${LOG_FORMAT:-text}
       MCP_API_KEY: ${MCP_API_KEY:?set MCP_API_KEY}
       TOKEN_SECRET: ${TOKEN_SECRET:?set TOKEN_SECRET}
       TOKEN_TTL_MIN: ${TOKEN_TTL_MIN:-60}

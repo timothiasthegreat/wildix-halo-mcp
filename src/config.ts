@@ -27,6 +27,7 @@ const bool = (def: boolean) =>
 const schema = z.object({
   PORT: z.coerce.number().int().default(3000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  LOG_FORMAT: z.enum(["json", "text"]).default("json"),
 
   // Auth between Wilma and this server
   MCP_API_KEY: z.string().min(24, "MCP_API_KEY must be at least 24 characters"),
