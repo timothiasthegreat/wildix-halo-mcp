@@ -6,3 +6,4 @@ swagger.json
 test
 portainer.env
 *.portainer.env
+.claude

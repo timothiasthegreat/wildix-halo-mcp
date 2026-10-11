@@ -11,7 +11,7 @@ Wilma ──(Streamable HTTP + Bearer key)──► wildix-halo-mcp ──(OAuth
 | Tool | Purpose |
 |---|---|
 | `verify_caller` | Phone: caller ID → Halo user, confirmed with the stated full name + company. Fallback when caller ID doesn't match: email on file + name + company. |
-| `verify_chat_user` | Chat: email already confirmed by Wilma's one-time code → Halo user (plus the person's name when the address is a shared mailbox). |
+| `verify_chat_user` | Chat: the email confirmed by Wildix's one-time code, plus the person's stated name and company, all matching the same Halo contact. |
 | `list_my_open_tickets` | The verified person's open tickets. |
 | `get_ticket_update` | Status, assigned tech and the latest **public** notes for one of their tickets. |
 | `create_ticket` | New ticket for the verified person, using the configured type, team and priority. Takes a `company` when the person belongs to several. |
@@ -20,10 +20,11 @@ Wilma ──(Streamable HTTP + Bearer key)──► wildix-halo-mcp ──(OAuth
 
 ### Security model
 - **Verification tokens.** The verify tools return a short-lived (default 60 min) HMAC-signed token holding the Halo user, client and site IDs. Every ticket tool requires it. The LLM can't forge a token or skip verification, and the client/user IDs on tickets always come from the token, never from the model.
+- **Channel-specific endpoints.** Each verify tool is only safe on its own channel. `/mcp/voice` never lists `verify_chat_user`, and `/mcp/chat` never lists `verify_caller`, so the server enforces this rather than relying on how each agent is configured.
 - **Shared contact details.** The server sorts every match into "same person" or "different people":
   - **Same person under several clients** (same name, same phone or email): one token covers all their records. Ticket lists span every company, and `create_ticket` asks which company. If the caller names a company that matches exactly one client, the token covers only that one.
   - **Different people on one office line:** the stated name picks the person. Two same-named people under the same client on that line count as ambiguous, and Wilma asks for the email.
-  - **Shared mailbox in chat** (several people on one address): Wilma is asked for the person's name, and only the matching contact is verified.
+  - **Shared mailbox in chat** (several people on one address): the stated name picks the person, and only the matching contact is verified.
   - Halo service accounts (alerting, PBX and firewall mailboxes) are excluded from every search and can never be verified or suggested as a match. This relies on the contact being flagged **Service Account** in Halo.
   - Phone searches page through results (up to 1,000 contacts on one number), and names are filtered before any record is fetched in full.
 - **Unverified callers can leave a message, nothing more.** `log_unverified_request` needs no token, always files under the Unknown client / General User at normal priority, and carries an "UNVERIFIED CALLER" banner. It returns only the new ticket number. It is rate-limited per caller ID, email and IP (3 per hour) and capped at 30 per hour overall.
@@ -64,13 +65,16 @@ npx @modelcontextprotocol/inspector   # Streamable HTTP, URL above, header Autho
 ## Deploy on Portainer
 1. Use the published image: set `WILDIX_HALO_MCP_IMAGE=<dockerhub-user>/wildix-halo-mcp:latest`. Or build it on the host with `docker build -t wildix-halo-mcp:latest .`.
 2. **Stacks → Add stack**, paste `docker-compose.yml`, and set the environment variables. Under *Environment variables*, choose **Load variables from .env file** and import a `portainer.env` file, which is git-ignored so secrets stay local. Make one by copying `.env.example` and removing the comment lines. Blank values fall back to the defaults in `docker-compose.yml`.
-3. The stack publishes no host ports. It joins an existing external Docker network named by `PROXY_NETWORK` (default `proxy`), which your reverse proxy must also be on. Create it first if needed with `docker network create proxy`. Then point the proxy, with TLS, at `http://wildix-halo-mcp:3000`, e.g. `https://wilma-halo.example.com` → `wildix-halo-mcp:3000`. Only `/mcp` and `/healthz` are served (plus `/debug/tool-calls` in test mode).
+3. The stack publishes no host ports. It joins an existing external Docker network named by `PROXY_NETWORK` (default `proxy`), which your reverse proxy must also be on. Create it first if needed with `docker network create proxy`. Then point the proxy, with TLS, at `http://wildix-halo-mcp:3000`, e.g. `https://wilma-halo.example.com` → `wildix-halo-mcp:3000`. The server answers on `/mcp/voice`, `/mcp/chat`, `/mcp` (and `/`) and `/healthz`, plus `/debug/tool-calls` in test mode.
 4. Check it: `curl https://wilma-halo.example.com/healthz` should return `{"ok":true}`.
 
 ## Wilma configuration
 - **Adding the server:** step by step, with a description to paste, in [docs/wilma-setup.md](docs/wilma-setup.md).
 - **Capabilities on a bot or voice agent:** variables, pipeline and annotation best practices in [docs/wilma-capabilities.md](docs/wilma-capabilities.md).
-- **MCP server URL:** `https://wilma-halo.example.com/mcp`
+- **Endpoints, one MCP server entry per channel:**
+  - `https://wilma-halo.example.com/mcp/voice` for voice agents (`verify_caller` + ticket tools).
+  - `https://wilma-halo.example.com/mcp/chat` for chat bots (`verify_chat_user` + ticket tools).
+  - The combined `/mcp` endpoint lists every tool. It's kept for older setups; turn it off with `MCP_ALLOW_COMBINED=false` once both agents use their own endpoint.
 - **Auth:** Bearer token `<MCP_API_KEY>`. A custom `X-API-Key` header also works.
 - **Instructions:** start from [docs/wilma-instructions.md](docs/wilma-instructions.md). Wilma must pass the call's caller ID to `verify_caller`.
 

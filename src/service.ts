@@ -207,7 +207,10 @@ export class WilmaService {
     return this.withTestFallback(await this.verifyCallerInner(input, ip), "phone");
   }
 
-  async verifyChatUser(input: { email: string; full_name?: string }, ip = "unknown"): Promise<VerifyResult> {
+  async verifyChatUser(
+    input: { email: string; full_name: string; company_name: string },
+    ip = "unknown",
+  ): Promise<VerifyResult> {
     return this.withTestFallback(await this.verifyChatUserInner(input, ip), "chat");
   }
 
@@ -249,32 +252,25 @@ export class WilmaService {
     };
   }
 
-  private async verifyChatUserInner(input: { email: string; full_name?: string }, ip: string): Promise<VerifyResult> {
+  /**
+   * Chat: the email the AI passes can't be proven to be the one Wildix confirmed by code, so the
+   * person must also give a name and company that match the same contact — the same strength as
+   * a phone call. This also resolves shared mailboxes (the name picks the person).
+   */
+  private async verifyChatUserInner(
+    input: { email: string; full_name: string; company_name: string },
+    ip: string,
+  ): Promise<VerifyResult> {
     this.rateLimit([`ip:${ip}`, `email:${input.email.toLowerCase()}`]);
-    const all = await this.usersByEmail(input.email);
-    if (all.length === 0) {
-      log("info", "verify_chat_unresolved", { outcome: "none" });
-      return {
-        verified: false,
-        message:
-          "That email address isn't registered with us. Do not reveal any account or ticket information; offer to have a technician follow up.",
-      };
-    }
-    if (allSamePerson(all)) return this.issue(all, "chat");
-
-    // Shared mailbox: several different people use this address. Narrow by the person's name.
-    if (!input.full_name) {
-      log("info", "verify_chat_shared_mailbox", { contacts: all.length });
-      return {
-        verified: false,
-        message: "This email address is shared by more than one person.",
-        next_step: "Ask for their full first and last name, then call verify_chat_user again with full_name.",
-      };
-    }
-    const found = this.resolvePerson(all.filter((u) => nameMatches(input.full_name!, u)));
+    const found = this.resolvePerson(await this.usersByEmail(input.email, input.full_name), input.company_name);
     if (Array.isArray(found)) return this.issue(found, "chat");
-    log("info", "verify_chat_unresolved", { outcome: found, shared: true });
-    return { verified: false, message: NOT_VERIFIED, next_step: "Offer to have a technician follow up." };
+    log("info", "verify_chat_unresolved", { outcome: found });
+    return {
+      verified: false,
+      message: NOT_VERIFIED,
+      next_step:
+        "Don't retry with different details. Offer to log a request for a technician to follow up (log_unverified_request).",
+    };
   }
 
   identityFromToken(token: string): VerifiedIdentity {
@@ -656,7 +652,7 @@ function listOr(items: string[]): string {
 }
 
 function verifiedBy(m: VerifiedIdentity["m"]): string {
-  return m === "phone" ? "caller ID + name + company" : m === "email" ? "email + name + company" : "email one-time code (Wilma chat)";
+  return m === "phone" ? "caller ID + name + company" : m === "email" ? "email + name + company" : "chat email + name + company";
 }
 
 function actionDate(a: HaloAction): number {

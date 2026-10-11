@@ -227,13 +227,13 @@ describe("same person under several companies", () => {
   });
 
   it("chat with an email on both records verifies across both", async () => {
-    const r = await svc.verifyChatUser({ email: "mike@acme.com" });
+    const r = await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" });
     expect(r.verified).toBe(true);
     expect(r.companies).toHaveLength(2);
   });
 
   it("lists open tickets from every company, tagged and newest first", async () => {
-    const r = await svc.verifyChatUser({ email: "mike@acme.com" });
+    const r = await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" });
     const list = await svc.listMyOpenTickets(r.token!);
     expect(list.tickets.map((t) => [t.ticket_id, t.company])).toEqual([
       [7001, "Acme Holdings"],
@@ -242,7 +242,7 @@ describe("same person under several companies", () => {
   });
 
   it("can read and update tickets from either company but not a third company's", async () => {
-    const { token } = await svc.verifyChatUser({ email: "mike@acme.com" });
+    const { token } = await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" });
     expect((await svc.getTicketUpdate(token!, 7001)).company).toBe("Acme Holdings");
     await svc.addTicketUpdate(token!, 5001, "still jammed");
     await expect(svc.getTicketUpdate(token!, 6001)).rejects.toBeInstanceOf(UserFacingError);
@@ -250,7 +250,7 @@ describe("same person under several companies", () => {
   });
 
   it("create_ticket asks which company, then files under the chosen one", async () => {
-    const { token } = await svc.verifyChatUser({ email: "mike@acme.com" });
+    const { token } = await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" });
     const input = { summary: "New laptop setup", details: "Need a laptop set up" };
     await expect(svc.createTicket(token!, input)).rejects.toThrow(/Acme Widgets Inc\. or Acme Holdings/);
     await expect(svc.createTicket(token!, { ...input, company: "Acme" })).rejects.toThrow(/doesn't clearly match/);
@@ -265,26 +265,37 @@ describe("same person under several companies", () => {
 
 describe("verifyChatUser", () => {
   it("verifies an exact email match only", async () => {
-    expect((await svc.verifyChatUser({ email: "sarah@acme.com" })).verified).toBe(true);
-    expect((await svc.verifyChatUser({ email: "acme.com" })).verified).toBe(false);
-    expect((await svc.verifyChatUser({ email: "nobody@acme.com" })).verified).toBe(false);
-    expect((await svc.verifyChatUser({ email: "old@acme.com" })).verified).toBe(false);
+    expect((await svc.verifyChatUser({ email: "sarah@acme.com", full_name: "Sarah Jones", company_name: "Acme Widgets" })).verified).toBe(true);
+    expect((await svc.verifyChatUser({ email: "acme.com", full_name: "Sarah Jones", company_name: "Acme" })).verified).toBe(false);
+    expect((await svc.verifyChatUser({ email: "nobody@acme.com", full_name: "No Body", company_name: "Acme" })).verified).toBe(false);
+    expect((await svc.verifyChatUser({ email: "old@acme.com", full_name: "Old User", company_name: "Acme" })).verified).toBe(false);
   });
 
-  it("asks for a name on a shared mailbox, then narrows to that person", async () => {
-    const first = await svc.verifyChatUser({ email: "office@initech.com" });
-    expect(first.verified).toBe(false);
-    expect(first.next_step).toMatch(/full_name/);
-    expect(JSON.stringify(first)).not.toMatch(/Bill|Peter|Lumbergh|Gibbons/);
-
-    const r = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Peter Gibbons" });
+  it("narrows a shared mailbox to the person by name, and needs the company too", async () => {
+    const r = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Peter Gibbons", company_name: "Initech" });
     expect(r.verified).toBe(true);
     expect(payload(r.token!).ids.map((x: any) => x.u)).toEqual([402]);
+    const wrongCompany = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Peter Gibbons", company_name: "Acme" });
+    expect(wrongCompany.verified).toBe(false);
   });
 
   it("rejects a shared mailbox when the name matches nobody on it", async () => {
-    const r = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Milton Waddams" });
+    const r = await svc.verifyChatUser({ email: "office@initech.com", full_name: "Milton Waddams", company_name: "Initech" });
     expect(r.verified).toBe(false);
+  });
+
+  it("knowing someone's email isn't enough: name and company must match the same contact", async () => {
+    // A chat user typing a victim's email with their own name
+    expect((await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Pat Lee", company_name: "Acme" })).verified).toBe(false);
+    // Right email and name, wrong company
+    expect((await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Globex" })).verified).toBe(false);
+  });
+
+  it("fails the same way whether or not the email exists", async () => {
+    const unknown = await svc.verifyChatUser({ email: "nobody@acme.com", full_name: "No Body", company_name: "Acme" });
+    const wrongName = await svc.verifyChatUser({ email: "mike@acme.com", full_name: "No Body", company_name: "Acme" });
+    expect(unknown).toEqual(wrongName);
+    expect(JSON.stringify(unknown)).not.toMatch(/registered|isn't/i);
   });
 });
 
@@ -461,7 +472,7 @@ describe("logUnverifiedRequest", () => {
 
 describe("service accounts", () => {
   it("asks Halo to exclude them", async () => {
-    await svc.verifyChatUser({ email: "mike@acme.com" });
+    await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" });
     expect(halo.gets.find((g) => g.path === "/Users")?.query).toMatchObject({
       includeserviceaccount: false,
       includenonserviceaccount: true,
@@ -469,7 +480,7 @@ describe("service accounts", () => {
   });
 
   it("can't be verified as, even if Halo returns them", async () => {
-    expect((await svc.verifyChatUser({ email: "pbx@chapel.example" })).verified).toBe(false);
+    expect((await svc.verifyChatUser({ email: "pbx@chapel.example", full_name: "Unknown Unknown", company_name: "Example Chapel" })).verified).toBe(false);
     const r = await svc.verifyCaller({ caller_id: "4035557311", full_name: "Unknown Unknown", company_name: "Example Chapel" });
     expect(r.verified).toBe(false);
   });
@@ -506,33 +517,33 @@ describe("test mode", () => {
   it("matches real test contacts, so scenarios can use specific test users", async () => {
     const r = await t.verifyCaller({ caller_id: "5025550144", full_name: "Patti Fernandez", company_name: "Test Co" });
     expect(payload(r.token!).ids[0].u).toBe(828);
-    const chat = await t.verifyChatUser({ email: "anyone@anywhere.com" });
+    const chat = await t.verifyChatUser({ email: "anyone@anywhere.com", full_name: "Any One", company_name: "Anywhere" });
     expect(payload(chat.token!).ids[0].u).toBe(338);
   });
 
   it("match mode only matches test contacts and lets failures fail", async () => {
     const strict = new WilmaService(halo, { ...testCfg, TEST_VERIFY_MODE: "match" });
     expect((await strict.verifyCaller({ caller_id: "6045551234", full_name: "Michael Smith", company_name: "Acme" })).verified).toBe(false);
-    expect((await strict.verifyChatUser({ email: "mike@acme.com" })).verified).toBe(false);
+    expect((await strict.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" })).verified).toBe(false);
     expect((await strict.verifyCaller({ caller_id: "5025550144", full_name: "Patti Fernandez", company_name: "Test Co" })).verified).toBe(true);
   });
 
   it("test and live tokens don't cross over", async () => {
-    const testToken = (await t.verifyChatUser({ email: "x@y.com" })).token!;
-    const liveToken = (await svc.verifyChatUser({ email: "mike@acme.com" })).token!;
+    const testToken = (await t.verifyChatUser({ email: "x@y.com", full_name: "Ex Why", company_name: "Nowhere" })).token!;
+    const liveToken = (await svc.verifyChatUser({ email: "mike@acme.com", full_name: "Michael Smith", company_name: "Acme" })).token!;
     await expect(svc.listMyOpenTickets(testToken)).rejects.toBeInstanceOf(UserFacingError);
     await expect(t.listMyOpenTickets(liveToken)).rejects.toBeInstanceOf(UserFacingError);
   });
 
   it("only sees test client tickets", async () => {
-    const token = (await t.verifyChatUser({ email: "x@y.com" })).token!;
+    const token = (await t.verifyChatUser({ email: "x@y.com", full_name: "Ex Why", company_name: "Nowhere" })).token!;
     expect((await t.listMyOpenTickets(token)).tickets.map((x) => x.ticket_id)).toEqual([9001]);
     expect((await t.getTicketUpdate(token, 9001)).ticket_id).toBe(9001);
     await expect(t.getTicketUpdate(token, 5001)).rejects.toBeInstanceOf(UserFacingError);
   });
 
   it("creates tickets under the test client, marked [TEST]", async () => {
-    const token = (await t.verifyChatUser({ email: "x@y.com" })).token!;
+    const token = (await t.verifyChatUser({ email: "x@y.com", full_name: "Ex Why", company_name: "Nowhere" })).token!;
     await t.createTicket(token, { summary: "Outlook broken", details: "test call from prompt dev" });
     expect(halo.posts[0]!.body[0]).toMatchObject({ summary: "[TEST] Outlook broken", user_id: 338, client_id: 273, site_id: 290 });
   });

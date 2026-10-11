@@ -10,14 +10,30 @@ export interface RequestInfo {
   userAgent?: string;
 }
 
-const INSTRUCTIONS = `Tools for helping a Fireside IT client contact with their support tickets in HaloPSA.
-Always verify the person first (verify_caller for phone calls, verify_chat_user for chat), then pass the returned token to every ticket tool.
-Never reveal ticket details, names or company information before verification succeeds.`;
+/**
+ * Which tools an endpoint exposes. Each verify tool is only safe on its own channel
+ * (verify_chat_user trusts a chat-confirmed email; verify_caller trusts the call's caller ID),
+ * so /mcp/voice and /mcp/chat each omit the other channel's verify tool. "all" is the
+ * combined /mcp endpoint kept for backward compatibility.
+ */
+export type Channel = "voice" | "chat" | "all";
 
-const tokenField = z
-  .string()
-  .min(10)
-  .describe("The verification token returned by verify_caller or verify_chat_user in this conversation.");
+export interface BuildOptions {
+  channel?: Channel;
+  toolLog?: ToolCallLog;
+}
+
+function instructions(channel: Channel): string {
+  const verify =
+    channel === "voice"
+      ? "verify_caller"
+      : channel === "chat"
+        ? "verify_chat_user"
+        : "verify_caller for phone calls, verify_chat_user for web chat";
+  return `Tools for helping a Fireside IT client contact with their support tickets in HaloPSA.
+Always verify the person first (${verify}), then pass the returned token to every ticket tool.
+Never reveal ticket details, names or company information before verification succeeds.`;
+}
 const ticketIdField = z.coerce
   .number()
   .int()
@@ -49,18 +65,28 @@ async function execute(tool: string, fn: () => Promise<unknown>): Promise<{ resu
 }
 
 /**
- * Build a fresh MCP server instance. `getReq` gives the HTTP client's IP (for rate limits)
- * and user agent. With `toolLog` (test mode), every call's arguments and result are recorded.
+ * Build a fresh MCP server instance for one channel. `getReq` gives the HTTP client's IP (for
+ * rate limits) and user agent. With `toolLog` (test mode), every call's arguments and result
+ * are recorded.
  */
-export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, toolLog?: ToolCallLog): McpServer {
-  const server = new McpServer({ name: "wildix-halo-mcp", version: "0.1.1" }, { instructions: INSTRUCTIONS });
+export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, opts: BuildOptions = {}): McpServer {
+  const channel = opts.channel ?? "all";
+  const toolLog = opts.toolLog;
+  const server = new McpServer({ name: "wildix-halo-mcp", version: "0.2.0" }, { instructions: instructions(channel) });
   const getIp = () => getReq().ip;
+  const tokenField = z
+    .string()
+    .min(10)
+    .describe(
+      `The verification token returned by ${channel === "voice" ? "verify_caller" : channel === "chat" ? "verify_chat_user" : "verify_caller or verify_chat_user"} in this conversation.`,
+    );
 
   const run = async (tool: string, args: unknown, fn: () => Promise<unknown>): Promise<CallToolResult> => {
     const started = Date.now();
     const { result, error } = await execute(tool, fn);
     toolLog?.write({
       kind: "tool_call",
+      channel,
       tool,
       args,
       is_error: result.isError === true,
@@ -73,7 +99,7 @@ export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, too
     return result;
   };
 
-  server.registerTool(
+  if (channel !== "chat") server.registerTool(
     "verify_caller",
     {
       title: "Verify a phone caller",
@@ -93,22 +119,19 @@ export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, too
     (args) => run("verify_caller", args, () => svc.verifyCaller(args, getIp())),
   );
 
-  server.registerTool(
+  if (channel !== "voice") server.registerTool(
     "verify_chat_user",
     {
       title: "Verify a chat user",
       description:
-        "Verify a person in a WEB CHAT whose email address has already been confirmed with a one-time code by the chat system. " +
-        "Pass that confirmed email address. Never use this for phone calls or for an email that hasn't been confirmed with a code. " +
-        "If the result says the address is shared by more than one person, ask for their full name and call again with `full_name`. " +
-        "On success, returns a `token` to use with the ticket tools.",
+        "Verify a person in a WEB CHAT before doing anything with tickets. " +
+        "Pass the email address the chat system confirmed with a one-time code at the start of the chat (never an address the person types or claims later), " +
+        "plus their full first and last name and their company name, as they state them. All three must match the same contact. " +
+        "On success, returns a `token` to use with the ticket tools. On failure, do not disclose any information about accounts or tickets.",
       inputSchema: {
-        email: z.string().email().describe("The email address that was confirmed by one-time code in this chat."),
-        full_name: z
-          .string()
-          .min(3)
-          .optional()
-          .describe("Person's first and last name. Only needed when asked for it (shared email address)."),
+        email: z.string().email().describe("The email address confirmed by one-time code in this chat."),
+        full_name: z.string().min(3).describe("The person's first and last name as they stated it."),
+        company_name: z.string().min(2).describe("The company the person says they work for."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -207,12 +230,15 @@ export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, too
         "and a description of the problem first. Tell them a technician will confirm who they are when they follow up. " +
         "Never use this for someone who verified successfully: use create_ticket instead.",
       inputSchema: {
-        channel: z.enum(["phone", "chat"]).describe("Whether this is a phone call or a web chat."),
+        // On a channel endpoint the channel is known, so it isn't asked for (and can't be wrong).
+        ...(channel === "all"
+          ? { channel: z.enum(["phone", "chat"]).describe("Whether this is a phone call or a web chat.") }
+          : {}),
         stated_name: z.string().min(2).max(120).describe("The name the person gave."),
         stated_company: z.string().max(200).optional().describe("The company the person says they're with."),
         callback_number: z.string().max(40).optional().describe("Best number to call them back on."),
         caller_id: z.string().max(40).optional().describe("Phone calls: the caller ID number of the inbound call."),
-        email: z.string().email().optional().describe("Email address they gave or that was confirmed in chat."),
+        email: z.string().email().optional().describe("Email address they gave, or the one confirmed in chat."),
         summary: z.string().min(5).max(180).describe("Short one-line title for the issue."),
         details: z.string().min(10).max(8000).describe("Description of the issue in their words plus facts you collected."),
         verification_issue: z
@@ -223,7 +249,22 @@ export function buildMcpServer(svc: WilmaService, getReq: () => RequestInfo, too
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (args) => run("log_unverified_request", args, () => svc.logUnverifiedRequest(args, getIp())),
+    (args) =>
+      run("log_unverified_request", args, () =>
+        svc.logUnverifiedRequest(
+          {
+            ...args,
+            channel:
+              channel === "voice"
+                ? "phone"
+                : channel === "chat"
+                  ? "chat"
+                  : ((args as { channel?: "phone" | "chat" }).channel ?? "phone"),
+            ...(channel === "chat" ? { caller_id: undefined } : {}),
+          },
+          getIp(),
+        ),
+      ),
   );
 
   return server;

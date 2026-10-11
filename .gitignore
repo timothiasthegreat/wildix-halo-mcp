@@ -5,3 +5,4 @@ dist/
 swagger.json
 portainer.env
 *.portainer.env
+.claude/worktrees/

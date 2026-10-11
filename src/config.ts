@@ -78,6 +78,10 @@ const schema = z.object({
   TOOL_LOG_FILE: z.string().default("/data/tool-calls.jsonl"),
   TOOL_LOG_MAX_MB: z.coerce.number().positive().default(20),
 
+  // Serve every tool on the combined /mcp (and /) endpoint. Set false once agents use
+  // /mcp/voice and /mcp/chat, so a misconfigured agent can't get the other channel's verify tool.
+  MCP_ALLOW_COMBINED: bool(true),
+
   // Behaviour
   DEFAULT_COUNTRY_CODE: z.string().regex(/^\d{1,3}$/).default("1"),
   ALLOW_CLIENT_WIDE_TICKETS: bool(false),
