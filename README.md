@@ -50,8 +50,19 @@ npm run dev            # http://localhost:3000/mcp
 npx @modelcontextprotocol/inspector   # Streamable HTTP, URL above, header Authorization: Bearer <MCP_API_KEY>
 ```
 
+## Docker image
+[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) builds the image for linux/amd64 and linux/arm64 after the tests pass.
+- **Where it pushes:** to Docker Hub on pushes to `main` (tags `latest` and `sha-<commit>`) and on version tags like `v1.2.3` (tags `1.2.3` and `1.2`).
+- **Pull requests** are built but not pushed.
+- **Setup:** in the repo's *Settings → Secrets and variables → Actions*, add:
+  - `DOCKERHUB_USERNAME` (secret)
+  - `DOCKERHUB_TOKEN` (secret): a Docker Hub access token with Read & Write scope
+  - optionally `DOCKERHUB_IMAGE` (variable), to override the default `<DOCKERHUB_USERNAME>/wildix-halo-mcp`
+
+  Until the secrets exist, the workflow builds without pushing.
+
 ## Deploy on Portainer
-1. Build the image on the Docker host (`docker build -t wildix-halo-mcp:latest .`), or push it to your registry.
+1. Use the published image: set `WILDIX_HALO_MCP_IMAGE=<dockerhub-user>/wildix-halo-mcp:latest`. Or build it on the host with `docker build -t wildix-halo-mcp:latest .`.
 2. **Stacks → Add stack**, paste `docker-compose.yml`, and set the environment variables (see `.env.example`).
 3. Publish it through your reverse proxy with TLS, e.g. `https://wilma-halo.example.com` → `wildix-halo-mcp:3000`. Only `/mcp` and `/healthz` are served.
 4. Check it: `curl https://wilma-halo.example.com/healthz` should return `{"ok":true}`.

@@ -2,7 +2,8 @@
 # (or an .env file next to this compose file when using docker compose directly).
 services:
   wildix-halo-mcp:
-    image: wildix-halo-mcp:latest
+    # Published by .github/workflows/docker-publish.yml, e.g. <dockerhub-user>/wildix-halo-mcp:latest
+    image: ${WILDIX_HALO_MCP_IMAGE:-wildix-halo-mcp:latest}
     build: .
     container_name: wildix-halo-mcp
     restart: unless-stopped
